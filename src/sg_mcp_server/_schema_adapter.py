@@ -6,6 +6,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from sg_mcp_server import _engine
+from sg_mcp_server._engine._schema import SEARCH_PAGE_SIZE
 
 if TYPE_CHECKING:
     from sg_mcp_server._diagnostics import DiagnosticContext
@@ -29,7 +30,8 @@ class SchemaArguments:
             `search`.
         query: Nonempty case-insensitive field-name or label substring for
             `search`.
-        offset: Zero-based page offset for `entities` and `describe`.
+        offset: Zero-based page offset. `entities` and `describe` pages hold
+            100 entries; `search` pages hold 40.
         refresh: Whether to force schema reflection before the operation.
     """
 
@@ -44,13 +46,16 @@ class SchemaArguments:
         object.__setattr__(self, 'offset', int(self.offset))
 
 
-def _entity(cache: SchemaSource, schema: SiteSchema, entity_type: str) -> SiteSchema:
-    """Return a schema containing the entity, refreshing once on a miss."""
+def _entity(
+    cache: SchemaSource, schema: SiteSchema, entity_type: str, *, refreshed: bool
+) -> SiteSchema:
+    """Return a schema containing the entity, refreshing once per call on a miss."""
     if schema.has_entity(entity_type):
         return schema
-    schema = cache.refresh()
-    if schema.has_entity(entity_type):
-        return schema
+    if not refreshed:
+        schema = cache.refresh()
+        if schema.has_entity(entity_type):
+            return schema
     raise _engine.ValidationError(
         f'{entity_type!r} is not an entity type',
         alternatives={'entity_types': schema.entity_types()},
@@ -58,9 +63,11 @@ def _entity(cache: SchemaSource, schema: SiteSchema, entity_type: str) -> SiteSc
     )
 
 
-def _paged(items: list[str], offset: int) -> tuple[list[str], str | None]:
+def _paged(
+    items: list[str], offset: int, page_size: int = SCHEMA_PAGE_SIZE
+) -> tuple[list[str], str | None]:
     """Slice one schema page, returning a continuation note when more exist."""
-    window = items[offset : offset + SCHEMA_PAGE_SIZE]
+    window = items[offset : offset + page_size]
     remaining = len(items) - offset - len(window)
     if remaining > 0:
         return window, f'... {remaining} more; repeat with offset={offset + len(window)}'
@@ -106,14 +113,19 @@ def _entities(schema: SiteSchema, offset: int) -> ToolBodyResult:
 
 
 def _search(schema: SiteSchema, arguments: SchemaArguments) -> ToolBodyResult:
-    """Render the capped schema field-search results."""
-    hits = schema.search_fields(arguments.query, arguments.entity_type or None)
-    body = '\n'.join(str(hit) for hit in hits) or '(no matches)'
+    """Render one page of schema field-search results."""
+    hits = schema.search_fields(arguments.query, arguments.entity_type or None, limit=None)
+    window, note = _paged([str(hit) for hit in hits], arguments.offset, SEARCH_PAGE_SIZE)
+    text_lines = [_SCHEMA_NOTICE, *window, *([note] if note else [])]
+    if not hits:
+        text_lines.append('(no matches)')
     structured: dict[str, MCPJSONValue] = {
-        'matches': [*hits],
+        'matches': [*hits[arguments.offset : arguments.offset + SEARCH_PAGE_SIZE]],
+        'total': len(hits),
+        'offset': arguments.offset,
         'contains_untrusted_site_text': True,
     }
-    return f'{_SCHEMA_NOTICE}\n{body}', structured
+    return '\n'.join(text_lines), structured
 
 
 def run_schema(
@@ -132,22 +144,31 @@ def run_schema(
         Model-facing text and its structured JSON equivalent.
 
     Raises:
-        ValidationError: If an operation or entity type is unknown.
-        SchemaError: If search arguments are invalid or a reflected description
-            is malformed.
+        ValidationError: If an argument the operation requires is missing, or
+            if an operation or entity type is unknown.
+        SchemaError: If a reflected description is malformed.
         QueryError: If reading the schema from SG fails.
     """
+    if arguments.op == 'search' and not arguments.query.strip():
+        raise _engine.ValidationError(
+            "op='search' requires query, a field name or label substring such as 'status'"
+        )
     schema = cache.refresh() if arguments.refresh else cache.current()
     if arguments.op == 'entities':
         with context.span('rendering'):
             return _entities(schema, arguments.offset)
     if arguments.op == 'describe':
-        schema = _entity(cache, schema, arguments.entity_type)
+        if not arguments.entity_type:
+            raise _engine.ValidationError(
+                "op='describe' requires entity_type; choose one of the entity types listed here",
+                alternatives={'entity_types': schema.entity_types()},
+            )
+        schema = _entity(cache, schema, arguments.entity_type, refreshed=arguments.refresh)
         with context.span('rendering'):
             return _describe(schema, arguments)
     if arguments.op == 'search':
         if arguments.entity_type:
-            schema = _entity(cache, schema, arguments.entity_type)
+            schema = _entity(cache, schema, arguments.entity_type, refreshed=arguments.refresh)
         with context.span('rendering'):
             return _search(schema, arguments)
     raise _engine.ValidationError(

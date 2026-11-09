@@ -6,6 +6,7 @@ import xmlrpc.client
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import (
+    Final,
     Literal,
     NotRequired,
     Protocol,
@@ -23,11 +24,21 @@ SGValue: TypeAlias = (
     bool | int | float | str | date | datetime | list['SGValue'] | dict[str, 'SGValue'] | None
 )
 SGRecord: TypeAlias = dict[str, SGValue]
+# Runtime counterpart of the scalar members of `SGValue`, for isinstance checks.
+SG_SCALAR_TYPES: Final = (bool, int, float, str, date, datetime)
 ValidatedFilters: TypeAlias = list[SGValue]
 
 
 class FindOptions(TypedDict, total=False):
-    """Optional keyword arguments forwarded to the SG `find()` boundary."""
+    """Optional keyword arguments forwarded to the SG `find()` boundary.
+
+    Attributes:
+        filter_operator: Top-level filter conjunction, or the provider default.
+        limit: Maximum records requested; zero means no overall limit.
+        order: Ordered sort clauses, or the provider default.
+        page: One-based page number, or zero for automatic pagination.
+        retired_only: Whether to request retired records.
+    """
 
     filter_operator: str | None
     limit: int
@@ -37,14 +48,26 @@ class FindOptions(TypedDict, total=False):
 
 
 class SummaryField(TypedDict):
-    """One native summarize field and operation specification."""
+    """One native summarize field and operation specification.
+
+    Attributes:
+        field: Field to aggregate.
+        type: Native aggregate operation, such as `count`, `sum`, or `average`.
+    """
 
     field: str
     type: str
 
 
 class SummaryGroup(TypedDict):
-    """One provider summary group with its key, label, aggregates, and optional nested children."""
+    """One provider summary group with optional nested children.
+
+    Attributes:
+        group_name: Provider-supplied display label for the group.
+        group_value: Underlying scalar or entity-link grouping value.
+        groups: Optional child groups for subsequent grouping fields.
+        summaries: Aggregate values keyed by summary field name.
+    """
 
     group_name: SGValue
     group_value: SGValue
@@ -53,7 +76,13 @@ class SummaryGroup(TypedDict):
 
 
 class SummaryGrouping(TypedDict):
-    """One native summarize grouping specification."""
+    """One native summarize grouping specification.
+
+    Attributes:
+        field: Field whose values define the groups.
+        direction: Optional ascending or descending group order.
+        type: Optional grouping mode; this boundary supports `exact`.
+    """
 
     field: str
     direction: NotRequired[Literal['asc', 'desc']]
@@ -61,14 +90,26 @@ class SummaryGrouping(TypedDict):
 
 
 class SummaryRequest(TypedDict):
-    """Native provider arguments for one summary query."""
+    """Native provider arguments for one summary query.
+
+    Attributes:
+        summary_fields: Aggregate specifications; validated engine requests
+            contain exactly one.
+        grouping: Optional ordered grouping specifications, from outermost
+            group to innermost group.
+    """
 
     summary_fields: list[SummaryField]
     grouping: NotRequired[list[SummaryGrouping]]
 
 
 class SummaryResponse(TypedDict):
-    """Raw grouped or ungrouped response from the SG summary boundary."""
+    """Raw grouped or ungrouped response from the SG summary boundary.
+
+    Attributes:
+        summaries: Overall aggregate values keyed by summary field name.
+        groups: Top-level summary groups, empty for an ungrouped response.
+    """
 
     summaries: dict[str, SGValue]
     groups: list[SummaryGroup]
@@ -90,11 +131,15 @@ class SGReadConnection(Protocol):
         Args:
             entity_type: Entity type to query.
             filters: Validated native SG filters.
-            fields: Fields to return.
+            fields: Fields to return, or `None` for provider defaults.
             **options: Supported ordering, limit, filter, and retired options.
 
         Returns:
             Matching records in provider order.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the concrete exception type is provider-defined.
         """
         ...
 
@@ -103,6 +148,10 @@ class SGReadConnection(Protocol):
 
         Returns:
             The provider's raw entity-schema mapping.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the concrete exception type is provider-defined.
         """
         ...
 
@@ -116,11 +165,15 @@ class SGReadConnection(Protocol):
 
         Args:
             entity_type: Entity type whose fields to read.
-            field_name: Optional exact field name.
+            field_name: Exact field name, or `None` for all fields.
             project_entity: Optional provider visibility context.
 
         Returns:
             The provider's raw field-schema mapping.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the concrete exception type is provider-defined.
         """
         ...
 
@@ -129,6 +182,10 @@ class SGReadConnection(Protocol):
 
         Returns:
             The provider's all-entity field-schema mapping.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the concrete exception type is provider-defined.
         """
         ...
 
@@ -151,6 +208,10 @@ class SGReadConnection(Protocol):
 
         Returns:
             Provider summary values and groups.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the concrete exception type is provider-defined.
         """
         ...
 
@@ -196,7 +257,7 @@ class _ShotgunModule(Protocol):
 
 
 def connect(config: Config) -> SGReadConnection:
-    """Create the live shotgun_api3 client for the configured site.
+    """Create the live `shotgun_api3` client for the configured site.
 
     Args:
         config: Resolved server configuration.
@@ -227,6 +288,10 @@ def provider_error_type() -> type[Exception]:
 
     Returns:
         The installed provider's base backend exception type.
+
+    Raises:
+        ModuleNotFoundError: If the optional provider or one of its imported
+            dependencies is unavailable.
     """
     provider = cast('_ShotgunModule', importlib.import_module('shotgun_api3.shotgun'))
     return provider.ShotgunError

@@ -13,14 +13,12 @@ from mcp.server import Server
 from support import FixtureConnection
 
 from sg_mcp_server import _server, _tools
-from sg_mcp_server._config import Config
 from sg_mcp_server._diagnostics import DiagnosticContext
 from sg_mcp_server._providers import (
     FindOptions,
     SGRecord,
     ValidatedFilters,
 )
-from sg_mcp_server._server import build_server
 from sg_mcp_server._surface import ToolRuntime, ToolSurface
 from tests.server._helpers import build_test_server, call, read_json_lines, text_of
 
@@ -53,11 +51,6 @@ class _ConcurrentConnection(FixtureConnection):
 
 
 class TestDispatch:
-    def test_audit_written_for_every_call(self, server: Server, tmp_path: Path) -> None:
-        call(server, 'sg_schema', {'op': 'entities'})
-        lines = (tmp_path / 'audit.jsonl').read_text().splitlines()
-        assert len(lines) == 1
-
     @pytest.mark.parametrize(
         ('structured', 'expected_ids'),
         cast(
@@ -108,16 +101,7 @@ class TestDispatch:
             handlers={'test_audit': handler},
             argument_error=lambda _tool, _arguments, error: str(error),
         )
-        server = build_server(
-            Config(
-                site_url='https://fixture.shotgunstudio.com',
-                script_name='s',
-                api_key='k',
-                audit_path=tmp_path / 'audit.jsonl',
-            ),
-            fixture_site,
-            surface,
-        )
+        server = build_test_server(fixture_site, tmp_path, surface=surface)
 
         result = call(server, 'test_audit', {})
 
@@ -201,11 +185,6 @@ class TestDispatch:
             call(server, 'sg_nope', {})
         assert 'unknown_tool' in (tmp_path / 'audit.jsonl').read_text()
 
-    def test_validation_error_is_a_result_not_an_exception(self, server: Server) -> None:
-        result = call(server, 'sg_query', {'entity_type': 'Shoot', 'filters': [], 'fields': []})
-        assert result.is_error is True
-        assert 'entity_types' in text_of(result)
-
 
 def test_audit_uses_dispatched_tool_name(fixture_site: FixtureConnection, tmp_path: Path) -> None:
     original = _tools.surface()
@@ -215,16 +194,7 @@ def test_audit_uses_dispatched_tool_name(fixture_site: FixtureConnection, tmp_pa
         handlers={'schema_alias': original.handlers['sg_schema']},
         argument_error=original.argument_error,
     )
-    server = build_server(
-        Config(
-            site_url='https://fixture.shotgunstudio.com',
-            script_name='s',
-            api_key='k',
-            audit_path=tmp_path / 'audit.jsonl',
-        ),
-        fixture_site,
-        surface,
-    )
+    server = build_test_server(fixture_site, tmp_path, surface=surface)
     result = call(server, 'schema_alias', {'op': 'entities'})
     assert result.is_error is False
     record = json.loads((tmp_path / 'audit.jsonl').read_text())

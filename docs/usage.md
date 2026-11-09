@@ -1,9 +1,7 @@
 # Using the server
 
-This guide is for people asking questions through sg-mcp-server or configuring it. It shows the
-kinds of questions to ask, the tool arguments behind them, every setting, and what to do when a
-request fails. If you have not installed the server yet, start with the
-[README quick start](../README.md#quick-start).
+Ask questions through your MCP client, or use the examples below to call the tools directly. For
+installation, start with the [README quick start](../README.md#quick-start).
 
 The server connects your MCP client to one SG site through a configured script. Every answer
 reflects that script's permissions, not those of the person asking.
@@ -29,14 +27,15 @@ You can ask questions in plain language without writing tool arguments. For exam
 - "Open Shot 123 and show its code." If that ID exists and the script can read it, `sg_get` returns
   the requested fields and a link to the record in SG.
 
-These examples describe the kind of answer to expect; they do not imply that particular records or
-status values exist. When a field or status is uncertain, ask the client to inspect the schema
-first.
+Your site determines which records and status values exist. When a field or status is uncertain,
+ask the client to inspect the schema first.
 
-Values of free-text fields, such as descriptions and note bodies, come back between
-`[BEGIN UNTRUSTED SG TEXT]` and `[END UNTRUSTED SG TEXT]` markers. Schema listings and linked
-record names carry a similar notice. Anyone who can edit your site can write that text, so the
-markers ask the client to treat it as data, not as instructions.
+### Interpret site text safely
+
+Values of free-text fields, such as descriptions and note bodies, and text values of calculated,
+query, and pivot fields come back between `[BEGIN UNTRUSTED SG TEXT]` and `[END UNTRUSTED SG TEXT]`
+markers. Schema listings and linked record names carry a similar notice. Anyone who can edit your
+site can write that text, so the markers ask the client to treat it as data, not as instructions.
 
 ## Tool-call examples
 
@@ -64,8 +63,9 @@ Describe the fields on one entity:
 ```
 
 `op: "search"` with a `query` matches field names and labels by case-insensitive substring and
-returns at most 40 matches; add `entity_type` to search one entity. Entity and field listings
-return 100 entries per page, and a longer listing tells the client which `offset` to request next.
+returns 40 matches per page; add `entity_type` to search one entity. Entity and field listings
+return 100 entries per page. Every page reports the `total`, and a longer result tells the client
+which `offset` to request next.
 
 The server caches the schema for 15 minutes by default (see [Settings](#settings)). Add
 `"refresh": true` to re-read it from your site, for example after adding a field. The schema
@@ -132,9 +132,11 @@ Count records instead of listing them with a `summarize` block:
 }
 ```
 
-A summary takes one summary field per call. It cannot be combined with selected `fields`, `order`,
-a positive `limit`, or `retired_only: true`, because SG's native summary call has none of those
-options.
+A summary takes one summary field per call. Leave out these unsupported combinations:
+
+- Selected `fields` or `order`.
+- A positive `limit`.
+- `retired_only: true`.
 
 Query results are bounded by the configured limits. When more records match, the result reports
 that it is truncated; narrow the filters or request a summary instead of treating the returned page
@@ -162,7 +164,7 @@ Set these environment variables in the MCP client's private server configuration
 
 | Variable                    | Default                        | Purpose                                                                |
 | --------------------------- | ------------------------------ | ---------------------------------------------------------------------- |
-| `SG_MCP_SITE_URL`           | Required                       | HTTPS site address, with no credentials, path, query, or fragment.     |
+| `SG_MCP_SITE_URL`           | Required                       | Bare HTTPS site address; see [Connection](#connection).                |
 | `SG_MCP_SCRIPT_NAME`        | Required                       | Script name used for all requests.                                     |
 | `SG_MCP_API_KEY`            | Required                       | API key for that script.                                               |
 | `SG_MCP_TIMEZONE`           | `UTC`                          | IANA time zone for rendered dates and relative-date filters.           |
@@ -173,23 +175,50 @@ Set these environment variables in the MCP client's private server configuration
 | `SG_MCP_SCHEMA_TTL_SECONDS` | `900`                          | How long, in seconds, the server reuses its cached copy of the schema. |
 | `SG_MCP_TIMEOUT_SECONDS`    | `60`                           | Seconds to wait for the SG site to accept a connection or send data.   |
 
-The limits must satisfy `1 <= SG_MCP_DEFAULT_LIMIT <= SG_MCP_HARD_LIMIT`. A query with `limit: 0`
-gets the default limit, not unlimited results as it would through SG directly, so every result
-stays bounded.
+### Connection
 
-Give `SG_MCP_AUDIT_PATH` and `SG_MCP_DIAGNOSTICS_PATH` absolute paths. The server does not expand
-`~`, and a relative path depends on the directory your client starts the server in. An unset or
-empty diagnostics path leaves diagnostics off; it does not turn off the security audit. A blank
-audit path stops startup instead, because it would point the audit at the working directory; unset
-`SG_MCP_AUDIT_PATH` to use the default file. The server tries to append an audit entry for every
-tool call. If an audit write fails, the server warns on standard error and still answers the
-request, so that call is missing from the audit.
+Set `SG_MCP_SITE_URL`, `SG_MCP_SCRIPT_NAME`, and `SG_MCP_API_KEY` to nonblank values. The site
+address must be an HTTPS origin with a valid host and port, without credentials, a non-root path, a
+query, or a fragment. A trailing `/` is accepted and removed.
 
-The server validates every request against a cached copy of the schema; reading the schema from SG
-takes two remote calls. When a request names an entity type or field that the cached copy lacks,
-the server re-reads the schema once before reporting an error, so new names work right away. A
-removed or changed field can cause a query error until the cache expires or the client requests
-`refresh: true`. A TTL of `0` or less re-reads the schema on every request.
+`SG_MCP_TIMEZONE` must name an available IANA zone, such as `UTC` or `America/Los_Angeles`.
+
+The server checks settings at startup and contacts SG on the first tool call. If that call fails,
+see [Troubleshooting](#troubleshooting).
+
+### Query limits
+
+Numeric settings must be integers. The limits must satisfy
+`1 <= SG_MCP_DEFAULT_LIMIT <= SG_MCP_HARD_LIMIT`. A query with `limit: 0` gets the default limit,
+not unlimited results as it would through SG directly, so every result stays bounded.
+
+### Audit and diagnostics
+
+Give `SG_MCP_AUDIT_PATH` and `SG_MCP_DIAGNOSTICS_PATH` absolute paths. The server expands a leading
+`~` to your home directory and refuses to start with a relative path, which would depend on the
+directory your client starts the server in.
+
+| Setting                   | When unset                           | When empty or whitespace                    |
+| ------------------------- | ------------------------------------ | ------------------------------------------- |
+| `SG_MCP_AUDIT_PATH`       | Uses `~/.sg-mcp-server/audit.jsonl`. | Stops startup; unset it to use the default. |
+| `SG_MCP_DIAGNOSTICS_PATH` | Diagnostics are off.                 | Diagnostics are off.                        |
+
+Disabling diagnostics does not disable the security audit. If the server cannot determine your home
+directory, set an explicit absolute audit path.
+
+The server tries to append an audit entry for every tool call. If an audit write fails, the server
+warns on standard error and still answers the request, so that call is missing from the audit.
+
+### Schema cache
+
+`SG_MCP_SCHEMA_TTL_SECONDS` controls how long the server reuses the schema when validating
+requests. A TTL of `0` or less re-reads the schema on every request.
+
+When a request names an entity type or field missing from the cache, the server re-reads the schema
+once before reporting an error. A removed or changed field can cause a query error until the cache
+expires or the client calls `sg_schema` with `refresh: true`.
+
+### Request timeout
 
 `SG_MCP_TIMEOUT_SECONDS` must be a whole number of at least 1. It applies to each connection
 attempt and each wait for data from SG, not to a whole request, so a slow but progressing response
@@ -199,32 +228,48 @@ proceed. Raise the value if a slow site needs longer.
 
 ## Troubleshooting
 
-**The server does not start.** Check that the client runs `sg-mcp-server` with no arguments and
-passes all three required settings; `sg-mcp-server --help` lists every setting. When the server
-cannot start, it writes one line to standard error, such as
-`error: the SG_MCP_SITE_URL setting is required`, and exits with status 2. It stops this way when a
-required setting is missing, the site URL is not a bare HTTPS origin, `SG_MCP_TIMEZONE` is not an
-available IANA zone such as `UTC` or `America/Los_Angeles`, `SG_MCP_AUDIT_PATH` is set but blank, a
-numeric setting is not an integer, `SG_MCP_TIMEOUT_SECONDS` is less than 1, the limits are out of
-order, or the client started it without standard output. If your client keeps a log for MCP
-servers, the message appears there. A server that exits with status 0 stopped normally, because the
-client disconnected or closed its input.
+### The server does not start
 
-**`error: the SG client is not installed`.** The install omitted the official SG client. Reinstall
+Check the MCP client's server log. Startup failures write one line to standard error, such as
+`error: the SG_MCP_SITE_URL setting is required`, and exit with status `2`.
+
+| Check               | What to do                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------------- |
+| Command             | Run `sg-mcp-server` with no arguments. Use `--help` to list settings.                              |
+| Connection settings | Supply all three required values and a valid HTTPS origin; see [Connection](#connection).          |
+| Time zone           | Use an available IANA zone.                                                                        |
+| File paths          | Use absolute paths and a nonblank audit path; see [Audit and diagnostics](#audit-and-diagnostics). |
+| Numeric settings    | Use integers, a timeout of at least `1`, and [valid query limits](#query-limits).                  |
+| Standard output     | Configure the client to provide standard output for MCP communication.                             |
+
+Exit status `0` means the server stopped normally because the client disconnected or closed its
+input.
+
+### The SG client is not installed
+
+`error: the SG client is not installed` means the install omitted the official SG client. Reinstall
 from the checkout with `uv tool install --reinstall '.[official]'`.
 
-**The first question fails.** The server does not contact your site until the first tool call, so a
-wrong script name or key, or an unreachable site, shows up there rather than at startup.
+### The first question fails
 
-**`the SG site request failed`.** The server could not reach SG or SG did not respond within
-`SG_MCP_TIMEOUT_SECONDS`. Check the site address, the network or VPN, and SG's status, then retry.
+The server does not contact your site until the first tool call, so a wrong script name or key, or
+an unreachable site, shows up there rather than at startup.
 
-**An entity, field, or filter error.** Ask the client to inspect the live schema and retry with a
-valid name. The error lists valid alternatives; the server never substitutes a different field for
-the one requested.
+### The SG site request failed
 
-**`sg_get` reports `no results`.** The query was valid, but no record with that ID is visible: it
-does not exist or the script's permissions hide it.
+The server could not reach SG or SG did not respond within `SG_MCP_TIMEOUT_SECONDS`. Check the site
+address, the network or VPN, and SG's status, then retry.
 
-**A request is slow.** Enable [latency diagnostics](diagnostics.md) to see where the server spends
-the time.
+### An entity, field, or filter error
+
+Ask the client to inspect the live schema and retry with a valid name. The error lists valid
+alternatives; the server never substitutes a different field for the one requested.
+
+### `sg_get` reports `no results`
+
+The query was valid, but no record with that ID is visible: it does not exist or the script's
+permissions hide it.
+
+### A request is slow
+
+Enable [latency diagnostics](diagnostics.md) to see where the server spends the time.

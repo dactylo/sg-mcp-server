@@ -1,5 +1,6 @@
 """Append-only JSONL security audit log."""
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -19,10 +20,8 @@ class AuditLog:
     def __init__(self, path: Path, caller: str) -> None:
         """Store the target path and caller identity.
 
-        No filesystem access happens here: directory creation lives in the
-        guarded write path, so an unwritable location degrades to the
-        documented warn-and-proceed behavior instead of aborting server
-        startup.
+        No filesystem access happens here. Parent-directory creation is
+        deferred until an entry is recorded.
         """
         self._path = path
         self._caller = caller
@@ -63,4 +62,5 @@ class AuditLog:
             with self._path.open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps(entry) + '\n')
         except OSError as error:
-            print(f'warning: audit write failed: {error}', file=sys.stderr)
+            with contextlib.suppress(Exception):
+                print(f'warning: audit write failed: {error}', file=sys.stderr)

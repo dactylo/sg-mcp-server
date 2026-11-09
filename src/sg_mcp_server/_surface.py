@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from sg_mcp_server._diagnostics import DiagnosticContext
     from sg_mcp_server._engine import SchemaCache
     from sg_mcp_server._providers import SGReadConnection
-    from sg_mcp_server._rendering import RenderResult
 
 _ArgumentErrorFn = Callable[[str, dict[str, Any], 'jsonschema.ValidationError'], str]
 MCPJSONValue: TypeAlias = JSONValue
@@ -27,7 +26,13 @@ ToolHandler = Callable[['ToolRuntime', dict[str, Any], 'DiagnosticContext'], typ
 
 
 class ToolRuntime(Protocol):
-    """Services the adapter provides to every handler call."""
+    """Services the adapter provides to every handler call.
+
+    Attributes:
+        config: Resolved settings for the server.
+        connection: SG read connection shared by the server's handlers.
+        schema_cache: Site schema cache shared across handler calls.
+    """
 
     config: Config
     connection: SGReadConnection
@@ -61,7 +66,7 @@ class ToolRuntime(Protocol):
         context: DiagnosticContext,
         *,
         require_record_id: int | None = None,
-    ) -> RenderResult:
+    ) -> ToolBodyResult:
         """Validate, execute, and render one engine-level query request.
 
         Args:
@@ -76,8 +81,9 @@ class ToolRuntime(Protocol):
             Rendered text and structured content.
 
         Raises:
-            EngineError: If validation or provider execution fails, or a
-                records query returns no rows with `require_record_id` set.
+            EngineError: If validation, schema access, provider execution, or
+                rendering fails, or a records query returns no rows with
+                `require_record_id` set.
         """
         ...
 

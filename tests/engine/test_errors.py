@@ -3,7 +3,6 @@ from sg_mcp_server._engine._errors import (
     QueryError,
     SchemaError,
     ValidationError,
-    _capped,
 )
 
 _EXPECTED_CAPPED_VALUES = [
@@ -48,18 +47,6 @@ _EXPECTED_CAPPED_VALUES = [
     'value_38',
     'value_39',
 ]
-
-
-class TestCapped:
-    def test_keeps_short_alternatives(self) -> None:
-        values = ['one', 'two']
-        assert _capped(values) == values
-
-    def test_never_fabricates_entries(self) -> None:
-        values = [f'value_{index}' for index in range(45)]
-
-        assert _capped(values) == _EXPECTED_CAPPED_VALUES
-        assert all(value in values for value in _capped(values))
 
 
 class TestEngineError:

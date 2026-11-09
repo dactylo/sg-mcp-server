@@ -1,4 +1,4 @@
-"""Environment-driven configuration for the solo-mode server."""
+"""Environment-driven server configuration."""
 
 import dataclasses
 import urllib.parse
@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_DEFAULT_AUDIT_PATH = Path.home() / '.sg-mcp-server' / 'audit.jsonl'
 DEFAULT_LIMIT = 50
 HARD_LIMIT = 200
 _SCHEMA_TTL_SECONDS = 900
@@ -19,6 +18,23 @@ class ConfigError(Exception):
     The message is one lowercase clause that names the setting, suitable for an
     `error:` line, and never repeats credentials from the site URL.
     """
+
+
+def _absolute_path(name: str, value: str) -> Path:
+    """Resolve a path setting or raise a named configuration error."""
+    try:
+        path = Path(value).expanduser() if value.startswith('~') else Path(value)
+        if path.is_absolute():
+            return path
+    except RuntimeError:
+        pass
+    message = f'the {name} setting must be an absolute path, got {value!r}'
+    raise ConfigError(message)
+
+
+def _default_audit_path() -> Path:
+    """Build the default audit destination when configuration is resolved."""
+    return Path.home() / '.sg-mcp-server' / 'audit.jsonl'
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,7 +64,7 @@ class Config:
     script_name: str
     api_key: str
     timezone: str = 'UTC'
-    audit_path: Path = _DEFAULT_AUDIT_PATH
+    audit_path: Path = dataclasses.field(default_factory=_default_audit_path)
     default_limit: int = DEFAULT_LIMIT
     hard_limit: int = HARD_LIMIT
     schema_ttl_seconds: int = _SCHEMA_TTL_SECONDS
@@ -119,7 +135,9 @@ class Config:
                 `SG_MCP_SITE_URL`, `SG_MCP_SCRIPT_NAME`, and `SG_MCP_API_KEY`;
                 these values are stripped. Optional `SG_MCP_TIMEZONE` and
                 `SG_MCP_AUDIT_PATH` override rendering and audit settings;
-                the audit path is stripped and must not be blank.
+                the audit path is stripped and must not be blank. Both path
+                settings expand a leading `~` and must resolve to absolute
+                paths.
                 Optional `SG_MCP_DEFAULT_LIMIT`, `SG_MCP_HARD_LIMIT`,
                 `SG_MCP_SCHEMA_TTL_SECONDS`, and `SG_MCP_TIMEOUT_SECONDS` are
                 parsed as integers; the timeout must be at least 1. Unset
@@ -131,9 +149,11 @@ class Config:
 
         Raises:
             ConfigError: If a required variable is absent, a numeric override
-                does not parse, the audit path is blank, the site URL violates
-                the HTTPS-origin rules, the timezone is unavailable or invalid,
-                the resolved limit combination is invalid, or the timeout is
+                does not parse, the audit path is blank, either path is not
+                absolute, the default audit path cannot be resolved because the
+                home directory is unknown, the site URL violates the
+                HTTPS-origin rules, the timezone is unavailable or invalid, the
+                resolved limit combination is invalid, or the timeout is
                 below 1.
         """
 
@@ -154,14 +174,17 @@ class Config:
                 message = f'the {name} setting must be an integer, got {raw!r}'
                 raise ConfigError(message) from error
 
-        def optional_path(name: str) -> Path | None:
-            raw = env.get(name, '').strip()
-            return Path(raw) if raw else None
-
         def audit_path() -> Path:
             raw = env.get('SG_MCP_AUDIT_PATH')
             if raw is None:
-                return _DEFAULT_AUDIT_PATH
+                try:
+                    return _default_audit_path()
+                except RuntimeError:
+                    message = (
+                        'the SG_MCP_AUDIT_PATH setting is required because '
+                        'the home directory cannot be determined'
+                    )
+                    raise ConfigError(message) from None
             value = raw.strip()
             if not value:
                 # Path('') is the working directory, where every audit write would fail.
@@ -169,7 +192,7 @@ class Config:
                     'the SG_MCP_AUDIT_PATH setting must not be blank; unset it to use the default'
                 )
                 raise ConfigError(message)
-            return Path(value)
+            return _absolute_path('SG_MCP_AUDIT_PATH', value)
 
         return cls(
             site_url=require('SG_MCP_SITE_URL'),
@@ -180,6 +203,12 @@ class Config:
             default_limit=integer('SG_MCP_DEFAULT_LIMIT', DEFAULT_LIMIT),
             hard_limit=integer('SG_MCP_HARD_LIMIT', HARD_LIMIT),
             schema_ttl_seconds=integer('SG_MCP_SCHEMA_TTL_SECONDS', _SCHEMA_TTL_SECONDS),
-            diagnostics_path=optional_path('SG_MCP_DIAGNOSTICS_PATH'),
+            diagnostics_path=_optional_path(env, 'SG_MCP_DIAGNOSTICS_PATH'),
             timeout_seconds=integer('SG_MCP_TIMEOUT_SECONDS', _TIMEOUT_SECONDS),
         )
+
+
+def _optional_path(env: Mapping[str, str], name: str) -> Path | None:
+    """Resolve an optional absolute path setting, preserving blank as absent."""
+    value = env.get(name, '').strip()
+    return _absolute_path(name, value) if value else None

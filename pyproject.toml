@@ -10,7 +10,7 @@ requires = [ "editables~=0.3", "hatch-fancy-pypi-readme>=25.1", "hatchling>=1.27
 # ==========================================================
 [project]
 name = "sg-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only MCP server for Autodesk Flow Production Tracking"
 keywords = [ "flow-production-tracking", "mcp", "server", "shotgrid", "shotgun" ]
 license = "MIT"
@@ -53,6 +53,7 @@ dev = [
   "pyproject-fmt",
   "pyright",
   "ruff",
+  "zizmor",
   { include-group = "test" },
 ]
 test = [
@@ -105,45 +106,7 @@ lint.ignore = [
   "T201",   # print() found
   "TRY003", # Avoid specifying long messages outside exception class
 ]
-# Exact-file exceptions for same-file private collaboration, intentional output, and tests.
-lint.per-file-ignores."experiments/arms/_arm_b.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/arms/_arm_d.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/arms/_arm_e.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/bakeoff/dataset/seed.py" = [ "T201" ]
-lint.per-file-ignores."experiments/bakeoff/driver.py" = [ "T201" ]
-lint.per-file-ignores."experiments/bakeoff/fixtures/augment_schema.py" = [ "T201" ]
-lint.per-file-ignores."experiments/bakeoff/harness/_questions.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/bakeoff/harness/_schema_tools.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/bakeoff/harness/runner.py" = [ "SLF001", "T201" ]
-lint.per-file-ignores."experiments/model_benchmark/_artifacts.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_budget.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_claude.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_cli.py" = [ "T201" ]
-lint.per-file-ignores."experiments/model_benchmark/_codex.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_interface_aggregation.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_interface_gate.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_interface_replay.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_live.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_realism.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_report.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_runner.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/model_benchmark/_subprocess.py" = [ "SLF001" ]
-lint.per-file-ignores."experiments/tests/**/*.py" = [
-  "D",       # No docstrings required in tests
-  "PLR2004", # Allow magic values in tests
-  "S101",    # Allow asserts in tests
-  "S603",    # Allow subprocess calls in tests
-  "SLF001",  # Tests intentionally inspect and patch private state
-]
-# Fake-host CLI responses intentionally use stdout.
-lint.per-file-ignores."experiments/tests/model_benchmark/fake_claude.py" = [ "T201" ]
-lint.per-file-ignores."experiments/tests/model_benchmark/fake_codex.py" = [ "T201" ]
-lint.per-file-ignores."scripts/diagnose_live_latency.py" = [ "T201" ]
-lint.per-file-ignores."scripts/smoke_test_live.py" = [ "SLF001", "T201" ]
-lint.per-file-ignores."src/sg_mcp_server/_audit.py" = [ "T201" ]
-lint.per-file-ignores."src/sg_mcp_server/_diagnostics.py" = [ "T201" ]
-lint.per-file-ignores."src/sg_mcp_server/_engine/_validation.py" = [ "SLF001" ]
-lint.per-file-ignores."src/sg_mcp_server/_rendering.py" = [ "SLF001" ]
+# Exceptions for tests.
 lint.per-file-ignores."tests/**/*.py" = [
   "D",       # No docstrings required in tests
   "PLR2004", # Allow magic values in tests
@@ -162,12 +125,13 @@ max_supported_python = "3.15"
 # ==========================================================
 [tool.pyright]
 pythonVersion = "3.11"  # Keep in sync with tool.ruff.target-version
+venv = ".venv"  # Created by make setup
+venvPath = "."
 typeCheckingMode = "strict"
 extraPaths = [ ".", "src" ]
 executionEnvironments = [
   { root = "tests/scripts", reportPrivateUsage = "none" },
   { root = "tests", reportPrivateUsage = "none" },
-  { root = "experiments/tests", reportPrivateUsage = "none" },
   { root = "." },
 ]
 

@@ -6,15 +6,17 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
 from mcp import ClientSession, StdioServerParameters, types
 
 from scripts import diagnose_live_latency
 from sg_mcp_server._config import Config
-from tests.server._helpers import build_test_server, call, read_json_lines
-from tests.support import FixtureConnection
+from tests.server._helpers import build_test_server, call
+
+if TYPE_CHECKING:
+    from tests.support import FixtureConnection
 
 _EXPECTED_DESCRIBE_ARGUMENTS = {'op': 'describe', 'entity_type': 'Project'}
 _EXPECTED_GET_ARGUMENTS = {
@@ -58,24 +60,28 @@ _RECORD_MUTATIONS: list[tuple[Callable[[dict[str, Any]], object], int]] = [
     (lambda record: record.__setitem__('unattributed_ms', -0.1), 1),
     (lambda record: record.__setitem__('duration_ms', 99.0), 1),
     (lambda record: record['schema_cache'].__setitem__('misses', 0), 1),
-    (lambda record: record['phases_ms'].pop('schema_reflection'), 1),
-    (lambda record: record['phases_ms'].__setitem__('schema_reflection', 0.1), 2),
+    (
+        lambda record: record.__setitem__(
+            'duration_ms', record['duration_ms'] - record['phases_ms'].pop('schema_reflection')
+        ),
+        1,
+    ),
+    (
+        lambda record: record.update(
+            phases_ms={**record['phases_ms'], 'schema_reflection': 0.1},
+            duration_ms=record['duration_ms'] + 0.1,
+        ),
+        2,
+    ),
 ]
 _REQUIRED_CREDENTIALS = (
     'SG_MCP_API_KEY',
     'SG_MCP_SCRIPT_NAME',
     'SG_MCP_SITE_URL',
 )
-_SUMMARY_MUTATIONS: list[Callable[[dict[str, Any]], object]] = [
-    lambda summary: summary.update(schema_version=True),
-    lambda summary: summary.__setitem__('raw_mcp_content', {'text': 'private-QX7V'}),
-    lambda summary: summary['samples'][0].__setitem__('raw_mcp_content', {'text': 'private-QX7V'}),
-    lambda summary: summary['setup_ms'].__setitem__('repository_path', '/private/QX7V'),
-    lambda summary: summary['samples'][0]['schema_cache'].__setitem__('site_id', 982_451_653),
-]
 
 
-class _DiagnosticSession:
+class DiagnosticSession:
     def __init__(
         self,
         diagnostic_path: Path,
@@ -85,9 +91,9 @@ class _DiagnosticSession:
         repeats: int = 2,
         response_mutator: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
-        self.call_count = 0
+        self._call_count = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.diagnostic_path = diagnostic_path
+        self._diagnostic_path = diagnostic_path
         self.enter_count = 0
         self.exit_count = 0
         self._include_project = include_project
@@ -110,8 +116,8 @@ class _DiagnosticSession:
     ) -> types.CallToolResult:
         assert arguments is not None
         self.calls.append((name, arguments))
-        call_index = self.call_count
-        self.call_count += 1
+        call_index = self._call_count
+        self._call_count += 1
         expected_name = self._expected_names[call_index]
         assert name == expected_name
         if name == 'sg_schema':
@@ -170,7 +176,7 @@ class _DiagnosticSession:
         record = _diagnostic_record(call_index + 31, name, cold=call_index == 0)
         if self._record_mutator is not None:
             self._record_mutator(record, call_index)
-        _append_record(self.diagnostic_path, record)
+        _append_record(self._diagnostic_path, record)
         return result
 
     async def initialize(self) -> types.InitializeResult:
@@ -259,21 +265,6 @@ def _diagnostic_record(
         'provider_call_count': provider_call_count,
         'unattributed_ms': 0.375,
     }
-
-
-def _probe(
-    session: _DiagnosticSession,
-    diagnostic_path: Path,
-    *,
-    repeats: int = 2,
-) -> diagnose_live_latency._LatencySummary:
-    return asyncio.run(
-        diagnose_live_latency._probe_session(
-            cast('ClientSession', session),
-            diagnostic_path,
-            repeats,
-        )
-    )
 
 
 def _safe_summary() -> dict[str, Any]:
@@ -369,6 +360,21 @@ def _set_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('SG_MCP_SITE_URL', 'https://private-site-QX7V.example')
 
 
+def probe(
+    session: DiagnosticSession,
+    diagnostic_path: Path,
+    *,
+    repeats: int = 2,
+) -> diagnose_live_latency._LatencySummary:
+    return asyncio.run(
+        diagnose_live_latency._probe_session(
+            cast('ClientSession', session),
+            diagnostic_path,
+            repeats,
+        )
+    )
+
+
 @pytest.mark.parametrize('repeats', [2, 7, 20])
 def test_arguments_accept_default_and_bounded_repeat_counts(repeats: int) -> None:
     default = diagnose_live_latency._parse_arguments(['--output-dir', 'new-output'])
@@ -392,11 +398,11 @@ def test_cursor_rejects_duplicate_gapped_or_nonincreasing_request_ids(
         diagnostic_path,
         _diagnostic_record(request_ids[0], 'sg_schema', cold=True),
     )
-    cursor._take('sg_schema', 1)
+    cursor.take('sg_schema', 1)
     _append_record(diagnostic_path, _diagnostic_record(request_ids[1], 'sg_schema'))
 
     with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        cursor._take('sg_schema', 2)
+        cursor.take('sg_schema', 2)
 
 
 def test_cursor_rejects_millisecond_value_that_overflows_float(tmp_path: Path) -> None:
@@ -410,7 +416,7 @@ def test_cursor_rejects_millisecond_value_that_overflows_float(tmp_path: Path) -
     cursor = diagnose_live_latency._DiagnosticCursor(diagnostic_path)
 
     with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        cursor._take('sg_schema', 1)
+        cursor.take('sg_schema', 1)
 
 
 @pytest.mark.parametrize('mode', ['missing', 'extra', 'malformed'])
@@ -428,7 +434,7 @@ def test_cursor_rejects_missing_extra_or_malformed_records(
     cursor = cursor_type(diagnostic_path)
 
     with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        cursor._take('sg_schema', 1)
+        cursor.take('sg_schema', 1)
 
 
 @pytest.mark.parametrize(
@@ -460,7 +466,7 @@ def test_cursor_rejects_unsafe_record_invariants(
     cursor = diagnose_live_latency._DiagnosticCursor(diagnostic_path)
     if ordinal == 2:
         _append_record(diagnostic_path, _diagnostic_record(14, 'sg_schema', cold=True))
-        cursor._take('sg_schema', 1)
+        cursor.take('sg_schema', 1)
         record = _diagnostic_record(15, 'sg_schema')
     else:
         record = _diagnostic_record(14, 'sg_schema', cold=True)
@@ -468,7 +474,7 @@ def test_cursor_rejects_unsafe_record_invariants(
     _append_record(diagnostic_path, record)
 
     with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        cursor._take('sg_schema', ordinal)
+        cursor.take('sg_schema', ordinal)
 
 
 def test_cursor_rejects_wrong_tool_order(tmp_path: Path) -> None:
@@ -477,7 +483,7 @@ def test_cursor_rejects_wrong_tool_order(tmp_path: Path) -> None:
     cursor = diagnose_live_latency._DiagnosticCursor(diagnostic_path)
 
     with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        cursor._take('sg_schema', 1)
+        cursor.take('sg_schema', 1)
 
 
 def test_diagnostic_server_uses_secret_only_for_connection_and_fixed_audit_caller(
@@ -521,7 +527,7 @@ def test_diagnostic_summary_reports_literal_partitioned_aggregates(
     tmp_path: Path,
 ) -> None:
     diagnostic_path = tmp_path / 'requests.jsonl'
-    session = _DiagnosticSession(diagnostic_path, repeats=3)
+    session = DiagnosticSession(diagnostic_path, repeats=3)
     durations_ms = (
         0.25,
         0.5,
@@ -545,7 +551,7 @@ def test_diagnostic_summary_reports_literal_partitioned_aggregates(
     clock = iter(ticks)
     monkeypatch.setattr(diagnose_live_latency.time, 'monotonic_ns', lambda: next(clock))
 
-    summary = _probe(session, diagnostic_path, repeats=3)
+    summary = probe(session, diagnostic_path, repeats=3)
 
     assert summary['operation_counts'] == {
         'schema': 3,
@@ -585,6 +591,26 @@ def test_existing_output_directory_is_refused_and_unchanged(
     assert str(output_dir) not in captured.err
 
 
+def test_help_describes_options_and_required_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv('COLUMNS', '200')
+    with pytest.raises(SystemExit) as caught:
+        diagnose_live_latency._parse_arguments(['--help'])
+
+    assert caught.value.code == 0
+    out = capsys.readouterr().out
+    for text in (
+        'it must not exist',
+        '2 to 20 (default: 5)',
+        'SG_MCP_SITE_URL',
+        'SG_MCP_SCRIPT_NAME',
+        'SG_MCP_API_KEY',
+    ):
+        assert text in out
+
+
 @pytest.mark.parametrize('repeats', ['1', '21', 'not-an-integer'])
 def test_invalid_repeat_count_fails_before_server_launch(
     repeats: str,
@@ -607,6 +633,34 @@ def test_invalid_repeat_count_fails_before_server_launch(
     assert caught.value.code == 2
     assert launched is False
     assert not (tmp_path / 'new').exists()
+
+
+def test_invalid_server_setting_is_reported_before_directory_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_credentials(monkeypatch)
+    monkeypatch.setenv('SG_MCP_TIMEZONE', 'Not/A_Zone')
+    launched = False
+
+    async def fail_if_launched(*args: object) -> dict[str, Any]:
+        nonlocal launched
+        del args
+        launched = True
+        raise AssertionError('server launch attempted')
+
+    monkeypatch.setattr(diagnose_live_latency, '_run_live', fail_if_launched)
+    output_dir = tmp_path / 'new'
+
+    assert diagnose_live_latency._main(['--output-dir', str(output_dir)]) == 1
+
+    assert capsys.readouterr().err == (
+        'live latency diagnostic failed: '
+        'the SG_MCP_TIMEZONE setting must name an available IANA timezone\n'
+    )
+    assert launched is False
+    assert not output_dir.exists()
 
 
 def test_main_bounds_malformed_diagnostic_without_exception_details(
@@ -669,16 +723,24 @@ def test_main_does_not_hide_unexpected_programming_errors(
         diagnose_live_latency._main(['--output-dir', str(tmp_path / 'new')])
 
 
+@pytest.mark.parametrize(
+    ('adversarial_path', 'failure'),
+    [
+        ('private-output-path-QX7V', OSError('private resolution error QX7V')),
+        ('private-symlink-loop-path-QX7V', RuntimeError('private symlink loop error QX7V')),
+    ],
+)
 def test_main_resolution_failure_is_bounded_without_path_or_exception(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    adversarial_path: str,
+    failure: Exception,
 ) -> None:
     _set_credentials(monkeypatch)
-    adversarial_path = 'private-output-path-QX7V'
 
     def fail_resolution(path: Path) -> Path:
         assert str(path) == adversarial_path
-        raise OSError('private resolution error QX7V')
+        raise failure
 
     monkeypatch.setattr(Path, 'resolve', fail_resolution)
 
@@ -690,31 +752,7 @@ def test_main_resolution_failure_is_bounded_without_path_or_exception(
         'live latency diagnostic failed: output directory could not be resolved\n'
     )
     assert adversarial_path not in captured.err
-    assert 'private resolution error QX7V' not in captured.err
-
-
-def test_main_resolution_runtime_failure_is_bounded_without_path_or_exception(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _set_credentials(monkeypatch)
-    adversarial_path = 'private-symlink-loop-path-QX7V'
-
-    def fail_resolution(path: Path) -> Path:
-        assert str(path) == adversarial_path
-        raise RuntimeError('private symlink loop error QX7V')
-
-    monkeypatch.setattr(Path, 'resolve', fail_resolution)
-
-    assert diagnose_live_latency._main(['--output-dir', adversarial_path]) == 1
-
-    captured = capsys.readouterr()
-    assert captured.out == ''
-    assert captured.err == (
-        'live latency diagnostic failed: output directory could not be resolved\n'
-    )
-    assert adversarial_path not in captured.err
-    assert 'private symlink loop error QX7V' not in captured.err
+    assert str(failure) not in captured.err
 
 
 def test_main_writes_only_three_safe_artifacts_with_stable_json(
@@ -786,14 +824,66 @@ def test_missing_credentials_report_all_names_without_values_or_directory_creati
     assert not output_dir.exists()
 
 
+def test_operator_audit_and_diagnostics_paths_do_not_stop_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_credentials(monkeypatch)
+    monkeypatch.setenv('SG_MCP_AUDIT_PATH', 'relative-audit.jsonl')
+    monkeypatch.setenv('SG_MCP_DIAGNOSTICS_PATH', 'relative-diagnostics.jsonl')
+    launched = False
+
+    async def fail_after_launch(*args: object) -> dict[str, Any]:
+        nonlocal launched
+        del args
+        launched = True
+        raise diagnose_live_latency._MCPRequestError('MCP request failed')
+
+    monkeypatch.setattr(diagnose_live_latency, '_run_live', fail_after_launch)
+
+    assert diagnose_live_latency._main(['--output-dir', str(tmp_path / 'new')]) == 1
+    assert launched is True
+
+
+def test_probe_accepts_documented_record_fields_in_any_order() -> None:
+    record = _diagnostic_record(1, 'sg_schema', cold=True)
+    record['schema_cache'] = dict(reversed(record['schema_cache'].items()))
+    reordered = diagnose_live_latency._parse_record(json.dumps(dict(reversed(record.items()))))
+
+    request_id, sample = diagnose_live_latency._validate_record(reordered, 'sg_schema', 1)
+
+    assert request_id == 1
+    assert sample['schema_cache'] == {'hits': 0, 'misses': 1, 'refreshes': 0}
+
+
+def test_probe_describe_check_tolerates_added_structured_fields() -> None:
+    result = types.CallToolResult(
+        content=[],
+        structured_content={
+            'entity': 'Project',
+            'display_name': 'Project',
+            'fields': [{'name': 'name'}],
+            'total': 1,
+            'offset': 0,
+            'contains_untrusted_site_text': True,
+            'added_by_a_newer_server': 'ignored',
+        },
+    )
+
+    diagnose_live_latency._validate_describe_result(result)
+
+
 def test_probe_record_invariants_accept_the_served_tools(
-    fixture_site: FixtureConnection, tmp_path: Path
+    fixture_site: 'FixtureConnection', tmp_path: Path
 ) -> None:
     project = fixture_site.create('Project', {'name': 'Probe'})
     server = build_test_server(fixture_site, tmp_path, diagnostics=True)
+    describe_results: list[types.CallToolResult] = []
     for _ in range(2):
         call(server, 'sg_schema', {'op': 'entities'})
-        call(server, 'sg_schema', {'op': 'describe', 'entity_type': 'Project'})
+        describe_results.append(
+            call(server, 'sg_schema', dict(diagnose_live_latency._DESCRIBE_ARGUMENTS))
+        )
         call(
             server,
             'sg_query',
@@ -806,15 +896,14 @@ def test_probe_record_invariants_accept_the_served_tools(
     )
 
     ordinals: dict[str, int] = {}
-    for record in read_json_lines(tmp_path / 'diagnostics.jsonl'):
-        ordinal = ordinals[record['tool']] = ordinals.get(record['tool'], 0) + 1
-        diagnose_live_latency._operation_invariants(
-            record['tool'],
-            ordinal,
-            record['phases_ms'],
-            record['schema_cache'],
-            record['provider_call_count'],
-        )
+    lines = (tmp_path / 'diagnostics.jsonl').read_text(encoding='utf-8').splitlines()
+    for line in lines:
+        record = diagnose_live_latency._parse_record(line)
+        tool = cast('str', record['tool'])
+        ordinal = ordinals[tool] = ordinals.get(tool, 0) + 1
+        diagnose_live_latency._validate_record(record, tool, ordinal)
+    for result in describe_results:
+        diagnose_live_latency._validate_describe_result(result)
 
 
 @pytest.mark.parametrize(
@@ -860,13 +949,13 @@ def test_probe_rejects_invalid_conditional_get_records(
             structured_content.update(copy.deepcopy(get_content))
 
     diagnostic_path = tmp_path / 'requests.jsonl'
-    session = _DiagnosticSession(
+    session = DiagnosticSession(
         diagnostic_path,
         response_mutator=replace_get_content,
     )
 
     with pytest.raises(RuntimeError) as caught:
-        _probe(session, diagnostic_path)
+        probe(session, diagnostic_path)
 
     assert str(caught.value) == 'MCP request failed'
     assert '982451653' not in str(caught.value)
@@ -911,13 +1000,13 @@ def test_probe_rejects_invalid_project_query_rows(
             structured_content.update(copy.deepcopy(query_content))
 
     diagnostic_path = tmp_path / 'requests.jsonl'
-    session = _DiagnosticSession(
+    session = DiagnosticSession(
         diagnostic_path,
         response_mutator=replace_query_content,
     )
 
     with pytest.raises(RuntimeError) as caught:
-        _probe(session, diagnostic_path)
+        probe(session, diagnostic_path)
 
     assert str(caught.value) == 'MCP request failed'
     assert '982451653' not in str(caught.value)
@@ -926,9 +1015,9 @@ def test_probe_rejects_invalid_project_query_rows(
 
 def test_probe_skips_get_when_first_query_has_no_project(tmp_path: Path) -> None:
     diagnostic_path = tmp_path / 'requests.jsonl'
-    session = _DiagnosticSession(diagnostic_path, include_project=False)
+    session = DiagnosticSession(diagnostic_path, include_project=False)
 
-    summary = _probe(session, diagnostic_path)
+    summary = probe(session, diagnostic_path)
 
     assert len(session.calls) == 6
     assert summary['project_found'] is False
@@ -948,9 +1037,9 @@ def test_probe_uses_fixed_sequence_in_one_session_and_returns_safe_summary(
     tmp_path: Path,
 ) -> None:
     diagnostic_path = tmp_path / 'requests.jsonl'
-    session = _DiagnosticSession(diagnostic_path)
+    session = DiagnosticSession(diagnostic_path)
 
-    summary = _probe(session, diagnostic_path)
+    summary = probe(session, diagnostic_path)
 
     assert session.calls == [
         ('sg_schema', {'op': 'entities'}),
@@ -1000,7 +1089,7 @@ def test_run_live_uses_one_stdio_transport_and_one_client_session(
     output_dir = tmp_path / 'new'
     output_dir.mkdir()
     diagnostic_path = output_dir / 'requests.jsonl'
-    session = _DiagnosticSession(diagnostic_path)
+    session = DiagnosticSession(diagnostic_path)
     stdio_context = _StdioContext()
     parameters_seen: list[StdioServerParameters] = []
     session_streams: list[tuple[object, object]] = []
@@ -1016,7 +1105,7 @@ def test_run_live_uses_one_stdio_transport_and_one_client_session(
         parameters_seen.append(parameters)
         return stdio_context
 
-    def fake_client_session(read_stream: object, write_stream: object) -> _DiagnosticSession:
+    def fake_client_session(read_stream: object, write_stream: object) -> DiagnosticSession:
         session_streams.append((read_stream, write_stream))
         return session
 
@@ -1062,46 +1151,3 @@ def test_server_parameters_use_checkout_module_and_isolated_environment(
     assert parameters.env['SG_MCP_SCHEMA_TTL_SECONDS'] == '3600'
     assert parameters.env['SG_MCP_DEFAULT_LIMIT'] == '50'
     assert parameters.env['SG_MCP_HARD_LIMIT'] == '200'
-
-
-@pytest.mark.parametrize(
-    ('field', 'value'),
-    [
-        ('schema_ttl_seconds', 3600.0),
-        ('default_limit', 50.0),
-        ('hard_limit', 200.0),
-    ],
-)
-def test_summary_validation_rejects_float_configuration_limits(
-    field: str,
-    value: float,
-) -> None:
-    summary = _safe_summary()
-    summary[field] = value
-    with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        diagnose_live_latency._validate_summary(summary)
-
-
-@pytest.mark.parametrize(
-    'mutation',
-    _SUMMARY_MUTATIONS,
-)
-def test_summary_validation_rejects_raw_or_unknown_content(
-    mutation: Callable[[dict[str, Any]], object],
-) -> None:
-    summary = _safe_summary()
-    mutation(summary)
-    with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        diagnose_live_latency._validate_summary(summary)
-
-
-def test_summary_write_rejects_unvalidated_content(tmp_path: Path) -> None:
-    summary = _safe_summary()
-    summary['raw_mcp_content'] = {'text': 'private-QX7V'}
-
-    with pytest.raises(RuntimeError, match=r'^malformed diagnostic record$'):
-        diagnose_live_latency._write_summary(
-            tmp_path, cast('diagnose_live_latency._LatencySummary', summary)
-        )
-
-    assert not (tmp_path / 'summary.json').exists()

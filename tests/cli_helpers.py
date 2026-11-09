@@ -8,7 +8,7 @@ import sys
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal, Protocol, TypeVar
+from typing import Protocol, TypeVar
 from unittest import mock
 
 from sg_mcp_server._cli import main
@@ -113,7 +113,6 @@ def invoke_cli(
     argv: Sequence[str],
     *,
     stdin: str = '',
-    cwd: Path | str | None = None,
 ) -> tuple[int, str, str]:
     stdout_buffer = io.BytesIO()
     stderr_buffer = io.BytesIO()
@@ -127,8 +126,6 @@ def invoke_cli(
         stack.enter_context(contextlib.redirect_stdout(stdout))
         stack.enter_context(contextlib.redirect_stderr(stderr))
         stack.enter_context(mock.patch.object(sys, 'stdin', stdin_stream))
-        if cwd is not None:
-            stack.enter_context(contextlib.chdir(cwd))
         try:
             status = main(argv)
         except SystemExit as error:
@@ -197,7 +194,6 @@ def run_cli(
     argv: Sequence[str],
     *,
     expect: int | None = None,
-    stdin: str = '',
     cwd: Path | str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -213,46 +209,10 @@ def run_cli(
         start_new_session=True,
         creationflags=PROCESS_GROUP_FLAGS,
     )
-    result = finish_process(process, stdin=stdin, timeout=CHILD_TIMEOUT_SECONDS, cwd=cwd)
+    result = finish_process(process, stdin='', timeout=CHILD_TIMEOUT_SECONDS, cwd=cwd)
     if expect is not None and result.returncode != expect:
         raise AssertionError(f'expected status {expect}\n{process_transcript(result, cwd=cwd)}')
     return result
-
-
-def run_closing_after_first_line(
-    argv: Sequence[str],
-    *,
-    timeout: float = CHILD_TIMEOUT_SECONDS,
-) -> subprocess.CompletedProcess[bytes]:
-    process = subprocess.Popen(
-        [sys.executable, '-m', 'sg_mcp_server', *argv],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_ENV,
-        start_new_session=True,
-        creationflags=PROCESS_GROUP_FLAGS,
-    )
-    stdout = process.stdout
-    assert stdout is not None
-    descriptor = stdout.fileno()
-
-    def read_first_line() -> None:
-        while True:
-            chunk = os.read(descriptor, 65536)
-            if not chunk or b'\n' in chunk:
-                return
-
-    reader = threading.Thread(target=read_first_line, daemon=True)
-    reader.start()
-    reader.join(timeout)
-    if reader.is_alive():
-        raise AssertionError(
-            _kill_and_describe(process, cwd=None, reason=f'no stdout line within {timeout:g} s')
-        )
-    stdout.close()
-    process.stdout = None  # communicate() must not read the closed pipe on Windows
-    return finish_process(process, timeout=timeout)
 
 
 def run_setup(
@@ -279,29 +239,22 @@ def run_setup(
     return result
 
 
-def run_with_closed_output(
-    argv: Sequence[str],
-    *,
-    closed: Literal['stdout', 'stderr'] = 'stdout',
-    stdin: bytes | None = None,
-    timeout: float = CHILD_TIMEOUT_SECONDS,
-    env: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess[bytes]:
+def run_with_closed_output(argv: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
     read_fd, write_fd = os.pipe()
     os.close(read_fd)  # every write to the closed stream happens after its reader closed
     try:
         process = subprocess.Popen(
             [sys.executable, '-m', 'sg_mcp_server', *argv],
-            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
-            stdout=write_fd if closed == 'stdout' else subprocess.PIPE,
-            stderr=write_fd if closed == 'stderr' else subprocess.PIPE,
-            env=dict(_ENV if env is None else env),
+            stdin=subprocess.DEVNULL,
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            env=_ENV,
             start_new_session=True,
             creationflags=PROCESS_GROUP_FLAGS,
         )
     finally:
         os.close(write_fd)
-    return finish_process(process, stdin=stdin, timeout=timeout)
+    return finish_process(process)
 
 
 def start_session(

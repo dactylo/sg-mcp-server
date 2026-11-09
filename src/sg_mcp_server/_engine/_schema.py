@@ -7,20 +7,14 @@ from typing import Protocol, cast
 
 from sg_mcp_server._engine._errors import (
     ENUMERATION_CAP,
-    QueryError,
     SchemaError,
-    transport_query_error,
+    provider_errors_as_query_errors,
 )
 from sg_mcp_server._json import JSONValue
-from sg_mcp_server._providers import (
-    RawSchema,
-    SGReadConnection,
-    provider_error_type,
-    provider_transport_error_types,
-)
+from sg_mcp_server._providers import RawSchema, SGReadConnection
 
 LINKED_PATH_SEGMENTS = 3
-_MAX_SEARCH_RESULTS = 40
+SEARCH_PAGE_SIZE = 40
 _SUGGESTION_DISTANCE_RATIO = 0.5
 _SUGGESTION_LIMIT = 3
 
@@ -29,11 +23,16 @@ class SiteSchema:
     """Read-only view over reflected SG field and entity metadata."""
 
     def __init__(self, fields: RawSchema, entities: RawSchema) -> None:
-        """Store the raw field and entity dumps.
+        """Retain the raw field and entity dumps without copying or validating them.
 
         Args:
-            fields: Field dump keyed by entity type.
-            entities: Entity dump keyed by entity type.
+            fields: Field dump keyed by entity type. The mapping and its nested
+                values are retained by reference.
+            entities: Entity dump keyed by entity type. The mapping and its
+                nested values are retained by reference.
+
+        Changes to either retained dump are visible through this view.
+        Malformed metadata is rejected when an accessor reads it.
         """
         self._fields = fields
         self._entities = entities
@@ -60,7 +59,11 @@ class SiteSchema:
             entity_type: Entity type to look up.
 
         Returns:
-            The display name, falling back to the entity type code.
+            The display name, falling back to the entity type code when entity
+            metadata is absent.
+
+        Raises:
+            SchemaError: If present entity display-name metadata is malformed.
         """
         entity = self._entities.get(entity_type)
         if entity is None:
@@ -99,7 +102,11 @@ class SiteSchema:
 
         Returns:
             `True` when the field is present, treating `id` and `type` as
-            present.
+            present on known entity types.
+
+        Raises:
+            SchemaError: If the reflected field mapping being inspected is
+                malformed.
         """
         if not self.has_entity(entity_type):
             return False
@@ -133,7 +140,8 @@ class SiteSchema:
             Sorted field names.
 
         Raises:
-            SchemaError: If the entity type does not exist.
+            SchemaError: If the entity type does not exist or its reflected
+                field mapping is malformed.
         """
         self._require_entity(entity_type)
         return sorted(self._entity_fields(entity_type))
@@ -146,7 +154,11 @@ class SiteSchema:
             field_name: The rejected field name.
 
         Returns:
-            Up to `_SUGGESTION_LIMIT` near-miss field names.
+            Up to `_SUGGESTION_LIMIT` near-miss field names, or an empty list
+            when the entity type is unknown.
+
+        Raises:
+            SchemaError: If the reflected field mapping is malformed.
         """
         if not self.has_entity(entity_type):
             return []
@@ -159,6 +171,26 @@ class SiteSchema:
             suggestions = self.suggest_fields(entity_type, field_name)
             hint = f' Did you mean: {", ".join(suggestions)}?' if suggestions else ''
             raise SchemaError(f'{field_name} is not a valid field for entity {entity_type}.{hint}')
+
+    def _string_list_property(
+        self, entity_type: str, field_name: str, key: str
+    ) -> list[str] | None:
+        """Return one reflected string-list field property, or `None` when absent."""
+        self._require_field(entity_type, field_name)
+        field = self._field(entity_type, field_name)
+        field_path = f'{entity_type}.{field_name}'
+        properties = _raw_object(
+            _raw_required(field, 'properties', field_path),
+            f'{field_path}.properties',
+        )
+        if key not in properties:
+            return None
+        return list(
+            _raw_string_list(
+                _raw_value(properties, key, f'{field_path}.properties'),
+                f'{field_path}.properties.{key}.value',
+            )
+        )
 
     def describe_field(self, entity_type: str, field_name: str) -> dict[str, JSONValue]:
         """Return one field description including bounded type constraints.
@@ -203,13 +235,9 @@ class SiteSchema:
         )
         if description:
             described['description'] = description
-        if 'valid_values' in properties:
-            values, omitted = _described_cap(
-                _raw_string_list(
-                    _raw_value(properties, 'valid_values', f'{field_path}.properties'),
-                    f'{field_path}.properties.valid_values.value',
-                )
-            )
+        valid_values = self._string_list_property(entity_type, field_name, 'valid_values')
+        if valid_values is not None:
+            values, omitted = _described_cap(valid_values)
             described['valid_values'] = [*values]
             if omitted:
                 described['valid_values_omitted'] = omitted
@@ -228,13 +256,9 @@ class SiteSchema:
             described['display_values'] = {key: typed_display_values.get(key, key) for key in keys}
             if omitted:
                 described['display_values_omitted'] = omitted
-        if 'valid_types' in properties:
-            values, omitted = _described_cap(
-                _raw_string_list(
-                    _raw_value(properties, 'valid_types', f'{field_path}.properties'),
-                    f'{field_path}.properties.valid_types.value',
-                )
-            )
+        valid_types = self._string_list_property(entity_type, field_name, 'valid_types')
+        if valid_types is not None:
+            values, omitted = _described_cap(valid_types)
             described['valid_types'] = [*values]
             if omitted:
                 described['valid_types_omitted'] = omitted
@@ -250,7 +274,8 @@ class SiteSchema:
             The entity display name and a sorted list of field descriptions.
 
         Raises:
-            SchemaError: If the entity type does not exist.
+            SchemaError: If the entity type does not exist or reflected entity
+                or field metadata is malformed.
         """
         self._require_entity(entity_type)
         return {
@@ -270,10 +295,13 @@ class SiteSchema:
             field_name: Field to look up.
 
         Returns:
-            The schema data type.
+            The reflected data type, or the synthetic type `number` for `id`
+            and `entity_type` for `type`. Synthetic fields do not require an
+            entity lookup.
 
         Raises:
-            SchemaError: If the field does not exist on the entity type.
+            SchemaError: If an ordinary field does not exist on the entity type
+                or its reflected metadata is malformed.
         """
         if field_name == 'id':
             return 'number'
@@ -288,19 +316,26 @@ class SiteSchema:
         )
 
     def search_fields(
-        self, query: str, entity_type: str | None = None
+        self,
+        query: str,
+        entity_type: str | None = None,
+        *,
+        limit: int | None = SEARCH_PAGE_SIZE,
     ) -> list[dict[str, JSONValue]]:
         """Return fields whose name or label contains a substring.
 
         Args:
             query: Case-insensitive substring to look for.
             entity_type: Optional entity type to restrict the search to.
+            limit: Maximum number of matches, or `None` to return all matches.
 
         Returns:
-            Up to `_MAX_SEARCH_RESULTS` matching field descriptions.
+            Matching field descriptions, ordered by entity type and field name,
+            capped at `limit` when it is not `None`.
 
         Raises:
-            SchemaError: If the query is empty or the entity type is unknown.
+            SchemaError: If the query is empty, the entity type is unknown, or
+                reflected metadata inspected during the search is malformed.
         """
         if not query:
             raise SchemaError('search_fields requires a non-empty query')
@@ -321,49 +356,39 @@ class SiteSchema:
                 )
                 if needle in field_name.lower() or needle in label.lower():
                     matches.append(self.describe_field(candidate_type, field_name))
-        return matches[:_MAX_SEARCH_RESULTS]
+        return matches[:limit]
 
     def valid_types(self, entity_type: str, field_name: str) -> list[str] | None:
-        """Return the entity types an entity or multi_entity field may point at.
+        """Return a field's reflected permitted entity types.
 
         Args:
             entity_type: Entity type owning the field.
             field_name: Field to look up.
 
         Returns:
-            The permitted entity types, or `None` for other data types.
+            A copy of the `valid_types` list, or `None` when that property is
+            absent. An empty reflected list remains an empty list.
 
         Raises:
-            SchemaError: If the field does not exist.
+            SchemaError: If the field does not exist or the reflected field or
+                `valid_types` metadata is malformed.
         """
-        self._require_field(entity_type, field_name)
-        field = self._field(entity_type, field_name)
-        field_path = f'{entity_type}.{field_name}'
-        properties = _raw_object(
-            _raw_required(field, 'properties', field_path),
-            f'{field_path}.properties',
-        )
-        if 'valid_types' not in properties:
-            return None
-        return list(
-            _raw_string_list(
-                _raw_value(properties, 'valid_types', f'{field_path}.properties'),
-                f'{field_path}.properties.valid_types.value',
-            )
-        )
+        return self._string_list_property(entity_type, field_name, 'valid_types')
 
     def resolve_path(self, entity_type: str, path: str) -> str:
         """Return the data type of a direct or dotted linked field path.
 
         Args:
             entity_type: Entity type the path starts from.
-            path: Either `field` or `link_field.LinkedType.subfield`.
+            path: A direct field, or successive `link_field.LinkedType` hops
+                ending in a field name.
 
         Returns:
             The data type of the final segment.
 
         Raises:
-            SchemaError: If any segment of the path is invalid.
+            SchemaError: If a path segment is invalid or reflected metadata
+                needed to resolve the path is malformed.
         """
         parts = path.split('.', 2)
         if len(parts) == 1:
@@ -393,13 +418,15 @@ class SiteSchema:
 
         Args:
             entity_type: Entity type the path starts from.
-            path: Either `field` or `link_field.LinkedType.subfield`.
+            path: A direct field, or successive `link_field.LinkedType` hops
+                ending in a field name.
 
         Returns:
             Tuple of (terminal entity type, terminal field name).
 
         Raises:
-            SchemaError: If any segment of the path is invalid.
+            SchemaError: If a path segment is invalid or reflected metadata
+                needed to resolve the path is malformed.
         """
         parts = path.split('.', 2)
         if len(parts) == 1:
@@ -410,33 +437,21 @@ class SiteSchema:
         return self.resolve_terminal(linked_type, subfield)
 
     def valid_values(self, entity_type: str, field_name: str) -> list[str] | None:
-        """Return the permitted values of a list or status_list field.
+        """Return a field's reflected permitted values.
 
         Args:
             entity_type: Entity type owning the field.
             field_name: Field to look up.
 
         Returns:
-            The permitted values, or `None` for other data types.
+            A copy of the `valid_values` list, or `None` when that property is
+            absent. An empty reflected list remains an empty list.
 
         Raises:
-            SchemaError: If the field does not exist.
+            SchemaError: If the field does not exist or the reflected field or
+                `valid_values` metadata is malformed.
         """
-        self._require_field(entity_type, field_name)
-        field = self._field(entity_type, field_name)
-        field_path = f'{entity_type}.{field_name}'
-        properties = _raw_object(
-            _raw_required(field, 'properties', field_path),
-            f'{field_path}.properties',
-        )
-        if 'valid_values' not in properties:
-            return None
-        return list(
-            _raw_string_list(
-                _raw_value(properties, 'valid_values', f'{field_path}.properties'),
-                f'{field_path}.properties.valid_values.value',
-            )
-        )
+        return self._string_list_property(entity_type, field_name, 'valid_values')
 
 
 class _SchemaCacheObserver(Protocol):
@@ -468,20 +483,26 @@ class _SchemaCacheObserver(Protocol):
 
 
 class SchemaCache:
-    """Site-level schema cache with TTL and explicit refresh.
+    """Site-level schema cache with a TTL and explicit refresh.
 
-    Spec Section 8: TTL default 15 minutes. Refresh-on-validation-miss is
-    driven from the seam (validate_with_schema in _validation.py) using
-    ValidationError.unknown_name, so ALL referenced names -- entity, fields,
-    filter paths, order and grouping fields -- trigger exactly one bounded
-    re-reflect. Removed-name staleness surfaces as a backend QueryError and
-    heals at the next TTL expiry or explicit refresh (a heuristic
-    stale-sniffing hook was considered and cut:
-    three freshness mechanisms suffice).
+    The schema is reflected on first use and reused until `ttl_seconds` elapse
+    or `refresh()` is called. Refresh on a validation miss is driven from
+    `validate_with_schema` in `_validation.py` using
+    `ValidationError.unknown_name`, so every referenced name (entity, fields,
+    filter paths, order and grouping fields) triggers exactly one bounded
+    re-reflection. A removed name surfaces as a backend `QueryError` and heals
+    at the next TTL expiry or explicit refresh.
     """
 
     def __init__(self, connection: SGReadConnection, ttl_seconds: int) -> None:
-        """Store the connection and TTL; no reflection happens here."""
+        """Store the connection and TTL; no reflection happens here.
+
+        Args:
+            connection: Shared connection used when schema reflection is
+                needed.
+            ttl_seconds: Cache lifetime in seconds. Zero or a negative value
+                causes every `current()` call to reflect again.
+        """
         self._connection = connection
         self._ttl_seconds = ttl_seconds
         self._loaded_at = 0.0
@@ -541,11 +562,19 @@ class SchemaSource(Protocol):
     """Supply cached schema reads and explicit refreshes to query validation."""
 
     def current(self) -> SiteSchema:
-        """Return the current schema, reflecting when needed."""
+        """Return the current schema, reflecting when needed.
+
+        Raises:
+            QueryError: If the schema provider rejects or fails reflection.
+        """
         ...
 
     def refresh(self) -> SiteSchema:
-        """Force reflection and return the refreshed schema."""
+        """Force reflection and return the refreshed schema.
+
+        Raises:
+            QueryError: If the schema provider rejects or fails reflection.
+        """
         ...
 
 
@@ -632,9 +661,7 @@ def _raw_value(mapping: dict[str, object], key: str, path: str) -> object:
 
 def _reflect(connection: SGReadConnection, observer: _SchemaCacheObserver | None) -> SiteSchema:
     """Read the full site schema through the connection."""
-    shotgun_error = provider_error_type()
-    transport_errors = provider_transport_error_types()
-    try:
+    with provider_errors_as_query_errors():
         if observer is not None:
             with observer.schema_reflection():
                 observer.provider_call()
@@ -646,7 +673,3 @@ def _reflect(connection: SGReadConnection, observer: _SchemaCacheObserver | None
             fields=connection.schema_read(),
             entities=connection.schema_entity_read(),
         )
-    except shotgun_error as error:
-        raise QueryError(str(error)) from error
-    except transport_errors as error:
-        raise transport_query_error(error) from error

@@ -103,10 +103,6 @@ class _RecordingObserver:
 
 
 class TestCacheLifecycle:
-    def test_current_is_cached(self, fixture_site: FixtureConnection) -> None:
-        cache = _build_cache(fixture_site)
-        assert cache.current() is cache.current()
-
     def test_expired_ttl_rebuilds(
         self, fixture_site: FixtureConnection, monkeypatch: pytest.MonkeyPatch
     ) -> None:

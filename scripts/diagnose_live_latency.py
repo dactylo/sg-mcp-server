@@ -35,18 +35,10 @@ from mcp.client.stdio import stdio_client
 from mcp.server import Server
 
 from sg_mcp_server import _tools
-from sg_mcp_server._config import Config
+from sg_mcp_server._config import Config, ConfigError
 from sg_mcp_server._providers import connect
 from sg_mcp_server._server import build_server
 
-_AGGREGATE_KEYS = (
-    'schema_all',
-    'schema_warm',
-    'describe_all',
-    'describe_warm',
-    'query_all',
-    'query_warm',
-)
 _ALLOWED_OUTCOMES = frozenset(
     {
         'invalid_arguments',
@@ -55,18 +47,6 @@ _ALLOWED_OUTCOMES = frozenset(
         'unexpected_error',
         'unknown_tool',
         'validation_error',
-    }
-)
-_ALLOWED_PHASES = frozenset(
-    {
-        'argument_validation',
-        'audit_write',
-        'connection_lock_wait',
-        'provider_call',
-        'query_validation',
-        'rendering',
-        'schema_cache_lookup',
-        'schema_reflection',
     }
 )
 _CACHE_KEYS = ('hits', 'misses', 'refreshes')
@@ -92,15 +72,6 @@ _MAX_REPEATS = 20
 _MILLISECOND_DECIMAL_EXPONENT = -6
 _MIN_REPEATS = 2
 _OPERATION_PHASES = {
-    'describe': frozenset(
-        {
-            'argument_validation',
-            'audit_write',
-            'connection_lock_wait',
-            'rendering',
-            'schema_cache_lookup',
-        }
-    ),
     'get': frozenset(
         {
             'argument_validation',
@@ -157,36 +128,7 @@ _REQUIRED_ENVIRONMENT = (
     'SG_MCP_SCRIPT_NAME',
     'SG_MCP_SITE_URL',
 )
-_SAMPLE_KEYS = (
-    'operation',
-    'ordinal',
-    'round_trip_ms',
-    'server_ms',
-    'phases_ms',
-    'unattributed_ms',
-    'schema_cache',
-    'provider_call_count',
-    'ok',
-)
 _SCHEMA_TTL_SECONDS = 3600
-_SETUP_KEYS = ('process_spawn', 'mcp_initialize', 'tool_listing')
-_STATS_KEYS = ('minimum', 'median', 'maximum')
-_SUMMARY_KEYS = (
-    'schema_version',
-    'repeats',
-    'schema_ttl_seconds',
-    'default_limit',
-    'hard_limit',
-    'tool_names',
-    'setup_ms',
-    'operation_counts',
-    'samples',
-    'aggregates_ms',
-    'project_found',
-    'get_attempted',
-    'get_ok',
-    'valid',
-)
 
 _Operation = Literal['schema', 'describe', 'query', 'get']
 
@@ -308,8 +250,18 @@ class _DiagnosticCursor:
         self._offset = 0
         self._path = path
 
-    def _take(self, expected_tool: str, ordinal: int) -> _ValidatedDiagnostic:
-        """Return one safe record correlated to the completed client call."""
+    def take(self, expected_tool: str, ordinal: int) -> _ValidatedDiagnostic:
+        """Return the next safe diagnostic record for a completed client call.
+
+        Args:
+            expected_tool: Tool name of the completed call.
+            ordinal: Position of the call within that tool's diagnostic
+                sequence.
+
+        Raises:
+            RuntimeError: The appended record is missing, malformed, or
+                mismatched.
+        """
         try:
             with self._path.open('rb') as handle:
                 handle.seek(self._offset)
@@ -374,8 +326,10 @@ async def _call_sample(
     started_ns = time.monotonic_ns()
     result = await session.call_tool(tool, arguments)
     round_trip_ms = _elapsed_ms(started_ns)
+    # Describe shares sg_schema's diagnostic ordinals with the entities call before it, so
+    # its record is checked against the warm-schema expectations.
     diagnostic_ordinal = ordinal + 1 if operation == 'describe' else ordinal
-    record = cursor._take(tool, diagnostic_ordinal)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    record = cursor.take(tool, diagnostic_ordinal)
     if result.is_error or record['outcome'] != 'ok':
         raise _MCPRequestError('MCP request failed')
     sample: _OperationSample = {
@@ -452,11 +406,11 @@ def _nonnegative_counter(candidate: object) -> int:
 
 
 def _cache_counts(candidate: object) -> _SchemaCacheCounts:
-    """Validate and copy one exact cache-counter object."""
+    """Validate and copy one cache-counter object with exactly the documented keys."""
     if not isinstance(candidate, dict):
         _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != _CACHE_KEYS:
+    mapping = cast('dict[str, object]', candidate)
+    if set(mapping) != set(_CACHE_KEYS):
         _malformed()
     return {
         'hits': _nonnegative_counter(mapping['hits']),
@@ -496,20 +450,35 @@ def _operation_invariants(
 def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     """Parse the fixed live diagnostic command-line interface."""
     parser = argparse.ArgumentParser(
-        description='Measure repeated safe reads through one live MCP stdio session.'
+        description='Measure repeated safe reads through one live MCP stdio session.',
+        epilog=(
+            'Set SG_MCP_SITE_URL, SG_MCP_SCRIPT_NAME, and SG_MCP_API_KEY before running. '
+            'See docs/diagnostics.md.'
+        ),
     )
-    parser.add_argument('--output-dir', required=True, type=Path)
-    parser.add_argument('--repeats', default=_DEFAULT_REPEATS, type=_bounded_repeats)
+    parser.add_argument(
+        '--output-dir',
+        required=True,
+        type=Path,
+        help='new directory for the artifacts; it must not exist, and its parent must',
+    )
+    parser.add_argument(
+        '--repeats',
+        default=_DEFAULT_REPEATS,
+        type=_bounded_repeats,
+        help=(
+            f'measurements per operation, {_MIN_REPEATS} to {_MAX_REPEATS} '
+            f'(default: {_DEFAULT_REPEATS})'
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def _phase_values(candidate: object) -> tuple[dict[str, float], Decimal]:
-    """Validate fixed phase names and return safe values plus their exact sum."""
+    """Validate phase values and return them plus their exact sum."""
     if not isinstance(candidate, dict):
         _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if not set(mapping).issubset(_ALLOWED_PHASES):
-        _malformed()
+    mapping = cast('dict[str, object]', candidate)
     phases: dict[str, float] = {}
     total = Decimal(0)
     for name, raw_value in mapping.items():
@@ -518,7 +487,7 @@ def _phase_values(candidate: object) -> tuple[dict[str, float], Decimal]:
     return phases, total
 
 
-def _project_record_id(record: dict[str, Any]) -> int:
+def _project_record_id(record: dict[str, object]) -> int:
     """Return one positive Project id from a validated row shape."""
     candidate = record.get('id')
     if record.get('type') != 'Project' or type(candidate) is not int or candidate <= 0:
@@ -542,11 +511,11 @@ async def _serve_diagnostic_server(environment: Mapping[str, str]) -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-def _server_parameters(
+def _server_environment(
     output_dir: Path,
-    inherited_environment: dict[str, str],
-) -> StdioServerParameters:
-    """Build exact current-checkout stdio parameters with isolated artifacts."""
+    inherited_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Build the child environment with isolated artifacts and fixed limits."""
     repository_root = Path(__file__).resolve().parents[1]
     environment = dict(inherited_environment)
     environment['SG_MCP_DIAGNOSTICS_PATH'] = str(output_dir / 'requests.jsonl')
@@ -559,17 +528,26 @@ def _server_parameters(
     environment['PYTHONPATH'] = (
         f'{source_path}{os.pathsep}{inherited_pythonpath}' if inherited_pythonpath else source_path
     )
+    return environment
+
+
+def _server_parameters(
+    output_dir: Path,
+    inherited_environment: dict[str, str],
+) -> StdioServerParameters:
+    """Build exact current-checkout stdio parameters with isolated artifacts."""
+    repository_root = Path(__file__).resolve().parents[1]
     return StdioServerParameters(
         command=sys.executable,
         args=[str(Path(__file__).resolve()), _PRIVATE_SERVER_MODE],
-        env=environment,
+        env=_server_environment(output_dir, inherited_environment),
         cwd=repository_root,
     )
 
 
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     """Build one JSON object while rejecting duplicate keys."""
-    result: dict[str, Any] = {}
+    result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
             _malformed()
@@ -577,7 +555,7 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _parse_record(line: str) -> dict[str, Any]:
+def _parse_record(line: str) -> dict[str, object]:
     """Parse one diagnostic line with exact numeric and object preservation."""
     try:
         candidate = json.loads(
@@ -589,26 +567,26 @@ def _parse_record(line: str) -> dict[str, Any]:
         _malformed()
     if not isinstance(candidate, dict):
         _malformed()
-    return cast('dict[str, Any]', candidate)
+    return cast('dict[str, object]', candidate)
 
 
-def _structured_mapping(result: types.CallToolResult) -> dict[str, Any]:
+def _structured_mapping(result: types.CallToolResult) -> dict[str, object]:
     """Return structured MCP content without retaining it in an artifact."""
     structured = result.structured_content
     if not isinstance(structured, dict):
         raise _MCPRequestError('MCP request failed')
-    return cast('dict[str, Any]', structured)
+    return cast('dict[str, object]', structured)
 
 
-def _project_records(result: types.CallToolResult) -> list[dict[str, Any]]:
+def _project_records(result: types.CallToolResult) -> list[dict[str, object]]:
     """Return the common records envelope after validating its row shapes."""
     records = _structured_mapping(result).get('records')
     if not isinstance(records, list):
         raise _MCPRequestError('MCP request failed')
-    values = cast('list[Any]', records)
+    values = cast('list[object]', records)
     if not all(isinstance(record, dict) for record in values):
         raise _MCPRequestError('MCP request failed')
-    return cast('list[dict[str, Any]]', values)
+    return cast('list[dict[str, object]]', values)
 
 
 def _project_id(result: types.CallToolResult) -> int | None:
@@ -619,15 +597,6 @@ def _project_id(result: types.CallToolResult) -> int | None:
     if not records:
         return None
     return _project_record_id(records[0])
-
-
-def _summary_milliseconds(candidate: object) -> float:
-    """Validate a nonnegative finite summary timing value."""
-    if type(candidate) is not float or not math.isfinite(candidate) or candidate < 0:
-        _malformed()
-    if round(candidate, 6) != candidate:
-        _malformed()
-    return candidate
 
 
 def _summary_stats(values: list[float]) -> _AggregateStats:
@@ -682,17 +651,17 @@ def _validate_artifact_set(output_dir: Path, *, summary_written: bool) -> None:
 def _validate_describe_result(result: types.CallToolResult) -> None:
     """Validate the Project describe shape without retaining field content."""
     structured = _structured_mapping(result)
-    if set(structured) != {
+    if not {
         'entity',
         'display_name',
         'fields',
         'total',
         'offset',
         'contains_untrusted_site_text',
-    }:
+    } <= set(structured):
         raise _MCPRequestError('MCP request failed')
     fields = structured['fields']
-    field_values = cast('list[Any]', fields) if isinstance(fields, list) else None
+    field_values = cast('list[object]', fields) if isinstance(fields, list) else None
     if (
         structured['entity'] != 'Project'
         or not isinstance(structured['display_name'], str)
@@ -714,13 +683,13 @@ def _validate_project_get_result(result: types.CallToolResult, expected_id: int)
 
 
 def _validate_record(
-    record: dict[str, Any],
+    record: dict[str, object],
     expected_tool: str,
     ordinal: int,
 ) -> tuple[int, _ValidatedDiagnostic]:
-    """Validate one exact server record and return only its safe sample fields."""
+    """Validate one server record's documented fields and return its safe sample fields."""
     if (
-        tuple(record) != _DIAGNOSTIC_KEYS
+        set(record) != set(_DIAGNOSTIC_KEYS)
         or type(record['schema_version']) is not int
         or record['schema_version'] != 1
     ):
@@ -730,7 +699,7 @@ def _validate_record(
     if type(request_id) is not int or request_id <= 0:
         _malformed()
     tool = record['tool']
-    if tool not in _EXPECTED_TOOL_NAMES or tool != expected_tool:
+    if tool != expected_tool:
         _malformed()
     outcome = record['outcome']
     if not isinstance(outcome, str) or outcome not in _ALLOWED_OUTCOMES:
@@ -744,7 +713,7 @@ def _validate_record(
     raw_unattributed = cast('Decimal', record['unattributed_ms'])
     if abs(raw_duration - phase_total - raw_unattributed) > _RECONCILIATION_TOLERANCE:
         _malformed()
-    _operation_invariants(tool, ordinal, phases, cache, provider_call_count)
+    _operation_invariants(expected_tool, ordinal, phases, cache, provider_call_count)
     return request_id, {
         'outcome': outcome,
         'duration_ms': duration_ms,
@@ -760,7 +729,7 @@ def _validate_schema_result(result: types.CallToolResult) -> None:
     entity_types = _structured_mapping(result).get('entity_types')
     if not isinstance(entity_types, list):
         raise _MCPRequestError('MCP request failed')
-    values = cast('list[Any]', entity_types)
+    values = cast('list[object]', entity_types)
     if not all(isinstance(entity_type, str) for entity_type in values):
         raise _MCPRequestError('MCP request failed')
 
@@ -881,181 +850,8 @@ async def _run_live(
                 )
 
 
-def _validate_stats(candidate: object) -> _AggregateStats:
-    """Validate one exact aggregate-statistics object."""
-    if not isinstance(candidate, dict):
-        _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != _STATS_KEYS:
-        _malformed()
-    stats: _AggregateStats = {
-        'minimum': _summary_milliseconds(mapping['minimum']),
-        'median': _summary_milliseconds(mapping['median']),
-        'maximum': _summary_milliseconds(mapping['maximum']),
-    }
-    if not stats['minimum'] <= stats['median'] <= stats['maximum']:
-        _malformed()
-    return stats
-
-
-def _validate_summary_aggregates(candidate: object) -> None:
-    """Validate the closed aggregate shape without recomputing generated values."""
-    if not isinstance(candidate, dict):
-        _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != _AGGREGATE_KEYS:
-        _malformed()
-    for value in mapping.values():
-        _validate_stats(value)
-
-
-def _validate_summary_flags(summary: dict[str, Any]) -> None:
-    """Validate the fixed Project/get relationship and expected validity state."""
-    project_found = summary['project_found']
-    get_attempted = summary['get_attempted']
-    get_ok = summary['get_ok']
-    if type(project_found) is not bool or type(get_attempted) is not bool:
-        _malformed()
-    if get_ok is not None and type(get_ok) is not bool:
-        _malformed()
-    invalid_relationship = project_found != get_attempted or (get_attempted and get_ok is not True)
-    if invalid_relationship or (not get_attempted and get_ok is not None):
-        _malformed()
-    if summary['valid'] is not True:
-        _malformed()
-
-
-def _validate_summary_header(summary: dict[str, Any]) -> int:
-    """Validate fixed summary metadata and return its repeat count."""
-    if tuple(summary) != _SUMMARY_KEYS:
-        _malformed()
-    repeats = summary['repeats']
-    if (
-        type(summary['schema_version']) is not int
-        or summary['schema_version'] != 1
-        or type(repeats) is not int
-        or not _MIN_REPEATS <= repeats <= _MAX_REPEATS
-        or type(summary['schema_ttl_seconds']) is not int
-        or summary['schema_ttl_seconds'] != _SCHEMA_TTL_SECONDS
-        or type(summary['default_limit']) is not int
-        or summary['default_limit'] != _DEFAULT_LIMIT
-        or type(summary['hard_limit']) is not int
-        or summary['hard_limit'] != _HARD_LIMIT
-        or summary['tool_names'] != list(_EXPECTED_TOOL_NAMES)
-    ):
-        _malformed()
-    return repeats
-
-
-def _validate_summary_operation_counts(
-    candidate: object,
-    samples: list[_OperationSample],
-) -> None:
-    """Validate exact operation counts against the retained samples."""
-    if not isinstance(candidate, dict):
-        _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != ('schema', 'describe', 'query', 'get'):
-        _malformed()
-    counts = {
-        operation: sum(sample['operation'] == operation for sample in samples)
-        for operation in ('schema', 'describe', 'query', 'get')
-    }
-    if any(type(value) is not int for value in mapping.values()) or mapping != counts:
-        _malformed()
-
-
-def _validate_summary_sample(candidate: object) -> _OperationSample:
-    """Validate one closed safe-summary sample object."""
-    if not isinstance(candidate, dict):
-        _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != _SAMPLE_KEYS:
-        _malformed()
-    operation = mapping['operation']
-    if operation not in ('schema', 'describe', 'query', 'get'):
-        _malformed()
-    ordinal = mapping['ordinal']
-    if type(ordinal) is not int or ordinal <= 0:
-        _malformed()
-    phases_candidate = mapping['phases_ms']
-    if not isinstance(phases_candidate, dict):
-        _malformed()
-    phase_mapping = cast('dict[str, Any]', phases_candidate)
-    if not set(phase_mapping).issubset(_ALLOWED_PHASES):
-        _malformed()
-    phases = {name: _summary_milliseconds(value) for name, value in phase_mapping.items()}
-    server_ms = _summary_milliseconds(mapping['server_ms'])
-    unattributed_ms = _summary_milliseconds(mapping['unattributed_ms'])
-    if abs(server_ms - sum(phases.values()) - unattributed_ms) > float(_RECONCILIATION_TOLERANCE):
-        _malformed()
-    cache = _cache_counts(mapping['schema_cache'])
-    provider_call_count = _nonnegative_counter(mapping['provider_call_count'])
-    if type(mapping['ok']) is not bool:
-        _malformed()
-    return {
-        'operation': operation,
-        'ordinal': ordinal,
-        'round_trip_ms': _summary_milliseconds(mapping['round_trip_ms']),
-        'server_ms': server_ms,
-        'phases_ms': phases,
-        'unattributed_ms': unattributed_ms,
-        'schema_cache': cache,
-        'provider_call_count': provider_call_count,
-        'ok': mapping['ok'],
-    }
-
-
-def _validate_summary_samples(
-    summary: dict[str, Any],
-    repeats: int,
-) -> list[_OperationSample]:
-    """Validate the exact fixed sample sequence and success flags."""
-    raw_samples = summary['samples']
-    if not isinstance(raw_samples, list):
-        _malformed()
-    samples = [_validate_summary_sample(sample) for sample in cast('list[Any]', raw_samples)]
-    expected_operations = [
-        operation
-        for ordinal in range(1, repeats + 1)
-        for operation in (
-            ('schema', ordinal),
-            ('describe', ordinal),
-            ('query', ordinal),
-        )
-    ]
-    if summary['get_attempted'] is True:
-        expected_operations.append(('get', 1))
-    actual_operations = [(sample['operation'], sample['ordinal']) for sample in samples]
-    if actual_operations != expected_operations or not all(sample['ok'] for sample in samples):
-        _malformed()
-    return samples
-
-
-def _validate_summary_setup(candidate: object) -> None:
-    """Validate the exact safe setup-timing object."""
-    if not isinstance(candidate, dict):
-        _malformed()
-    mapping = cast('dict[str, Any]', candidate)
-    if tuple(mapping) != _SETUP_KEYS:
-        _malformed()
-    for value in mapping.values():
-        _summary_milliseconds(value)
-
-
-def _validate_summary(summary: dict[str, Any]) -> None:
-    """Validate a complete summary at the serialization boundary."""
-    repeats = _validate_summary_header(summary)
-    _validate_summary_setup(summary['setup_ms'])
-    samples = _validate_summary_samples(summary, repeats)
-    _validate_summary_operation_counts(summary['operation_counts'], samples)
-    _validate_summary_aggregates(summary['aggregates_ms'])
-    _validate_summary_flags(summary)
-
-
 def _write_summary(output_dir: Path, summary: _LatencySummary) -> None:
-    """Validate and write one stable safe summary with a trailing newline."""
-    _validate_summary(cast('dict[str, Any]', summary))
+    """Write one stable safe summary with a trailing newline."""
     try:
         (output_dir / 'summary.json').write_text(
             json.dumps(summary, indent=2) + '\n',
@@ -1079,6 +875,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
         if output_dir.exists():
             raise _OutputExistsError
         environment = _required_environment()
+        try:
+            Config.from_env(_server_environment(output_dir, environment))
+        except ConfigError as error:
+            raise _ConfigurationError(str(error)) from error
         try:
             output_dir.mkdir()
         except FileExistsError as error:

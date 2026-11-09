@@ -76,7 +76,7 @@ def calendar_range(
         Start and end timestamps of the requested period.
 
     Raises:
-        _RelativeDateError: If the operator is not a calendar relation or its
+        ValidationError: If the operator is not a calendar relation or its
             arithmetic exceeds the supported date range.
     """
     try:
@@ -125,7 +125,7 @@ def field_values(
         Two literals: ISO date strings for `date`, datetimes for `date_time`.
 
     Raises:
-        _RelativeDateError: If the data type cannot hold a relative-date range.
+        ValidationError: If the data type cannot hold a relative-date range.
     """
     start, end = bounds
     if data_type == 'date':
@@ -168,8 +168,8 @@ def span_range(
         Start and end timestamps of the window.
 
     Raises:
-        _RelativeDateError: If the operator or count is invalid, or if
-            `_shift()` rejects the unit or exceeds the supported date range.
+        ValidationError: If the operator, count, or unit is invalid, or if the
+            window exceeds the supported date range.
     """
     if operator not in SPAN_OPERATORS:
         raise _RelativeDateError(f'{operator!r} is not a relative time-span relation')

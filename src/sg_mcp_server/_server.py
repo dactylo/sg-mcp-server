@@ -286,7 +286,7 @@ class _ServerAdapter:
         context: DiagnosticContext,
         *,
         require_record_id: int | None = None,
-    ) -> _rendering.RenderResult:
+    ) -> ToolBodyResult:
         """Validate, execute, and render one shared engine request.
 
         Args:
@@ -301,8 +301,9 @@ class _ServerAdapter:
             Rendered text and structured content.
 
         Raises:
-            EngineError: If validation or provider execution fails, or a
-                records query returns no rows with `require_record_id` set.
+            EngineError: If validation, schema access, provider execution, or
+                rendering fails, or a records query returns no rows with
+                `require_record_id` set.
         """
         cache = ObservedSchemaCache(self.schema_cache, context)
         connection = ObservedConnection(self.connection, context)
@@ -322,13 +323,14 @@ class _ServerAdapter:
                 '(the query itself was valid)'
             )
         with context.span('rendering'):
-            return _rendering.render_result(
+            rendered = _rendering.render_result(
                 result,
                 site_schema,
                 entity_type,
                 self.config.site_url,
                 self.config.timezone,
             )
+        return cast('ToolBodyResult', rendered)
 
 
 def _record_ids(structured: MCPStructuredContent) -> list[int]:
@@ -367,6 +369,7 @@ def build_server(
         the installed distribution version to clients.
 
     Raises:
+        jsonschema.SchemaError: If a supplied tool has an invalid input schema.
         PackageNotFoundError: If the installed distribution metadata is
             unavailable.
     """

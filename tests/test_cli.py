@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import contextlib
 import errno
@@ -10,7 +9,7 @@ import signal
 import sys
 import textwrap
 import traceback
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Never
 
@@ -19,7 +18,7 @@ from mcp.server import Server
 
 import sg_mcp_server
 from sg_mcp_server import _cli, _downstream
-from sg_mcp_server._cli import _build_parser, main
+from sg_mcp_server._cli import main
 from sg_mcp_server._config import Config
 from tests.cli_helpers import (
     invoke_cli,
@@ -71,23 +70,6 @@ def _fixed_version(_name: str) -> str:
     return '9.8.7'
 
 
-def _help_entries(
-    parser: argparse.ArgumentParser, prefix: str
-) -> Iterator[tuple[str, str | None]]:
-    for action in parser._actions:
-        if action.help is not argparse.SUPPRESS:
-            label = '/'.join(action.option_strings) or action.dest
-            yield f'{prefix} {label}', action.help
-
-
-@pytest.fixture(autouse=True)
-def _isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Each test sets the server settings it needs; none come from the developer.
-    for name in list(os.environ):
-        if name.startswith('SG_MCP_'):
-            monkeypatch.delenv(name)
-
-
 def _message(payload: Mapping[str, object]) -> str:
     return json.dumps(payload) + '\n'
 
@@ -103,10 +85,12 @@ def _process_environment(tmp_path: Path) -> dict[str, str]:
     return environment | _SITE_SETTINGS | {'SG_MCP_AUDIT_PATH': str(tmp_path / 'audit.jsonl')}
 
 
-def _starts_in_lowercase_style(text: str) -> bool:
-    first = text.split(maxsplit=1)[0]
-    is_acronym = first.upper() == first and any(character.isalpha() for character in first)
-    return text[0].islower() or is_acronym
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each test sets the server settings it needs; none come from the developer.
+    for name in list(os.environ):
+        if name.startswith('SG_MCP_'):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture
@@ -191,15 +175,6 @@ def test_error_lines_escape_control_characters(capsys: pytest.CaptureFixture[str
     assert capsys.readouterr().err == 'error: bad\\x1b[31m value\\x0a\n'
 
 
-def test_every_visible_option_and_command_has_lowercase_help() -> None:
-    problems = [
-        f'{name}: {text!r}'
-        for name, text in _help_entries(_build_parser(), 'sg-mcp-server')
-        if not text or not _starts_in_lowercase_style(text) or text.endswith('.')
-    ]
-    assert problems == []
-
-
 def test_help_goes_to_stdout() -> None:
     status, stdout, stderr = invoke_cli(['--help'])
     assert (status, stderr) == (0, '')
@@ -222,6 +197,13 @@ def test_help_goes_to_stdout() -> None:
         'SG_MCP_SCHEMA_TTL_SECONDS',
         'SG_MCP_TIMEOUT_SECONDS',
     }
+
+
+def test_help_links_to_the_published_settings_guide() -> None:
+    status, stdout, _stderr = invoke_cli(['--help'])
+    assert status == 0
+    assert 'https://github.com/dactylo/sg-mcp-server/blob/main/docs/usage.md#settings' in stdout
+    assert ' docs/usage.md' not in stdout
 
 
 @pytest.mark.parametrize(

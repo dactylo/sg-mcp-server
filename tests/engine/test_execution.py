@@ -7,9 +7,9 @@ from typing import Unpack, cast
 import pytest
 from shotgun_api3.lib.httplib2.error import ServerNotFoundError
 from shotgun_api3.shotgun import ShotgunError
-from support import FixtureConnection
+from support import FailingFindConnection, FixtureConnection
 
-from sg_mcp_server._engine import _execution as execution
+from sg_mcp_server._engine import _errors as engine_errors
 from sg_mcp_server._engine._errors import QueryError
 from sg_mcp_server._engine._execution import run_query
 from sg_mcp_server._engine._schema import SchemaCache, SiteSchema
@@ -20,21 +20,6 @@ _NOW = datetime.datetime.fromisoformat('2026-07-31T12:00:00+00:00')
 _SHOT_COUNT = 5
 
 _Loaded = tuple[FixtureConnection, SiteSchema]
-
-
-class _FindErrorConnection(FixtureConnection):
-    def __init__(self, source: FixtureConnection) -> None:
-        self.site = source.site
-
-    def find(
-        self,
-        entity_type: str,
-        filters: ValidatedFilters,
-        fields: list[str] | None = None,
-        **options: Unpack[FindOptions],
-    ) -> list[SGRecord]:
-        del entity_type, fields, filters, options
-        raise ShotgunError('find backend fault')
 
 
 class _RecordingFindConnection(FixtureConnection):
@@ -96,7 +81,10 @@ class TestRecords:
         site, schema = loaded
 
         with pytest.raises(QueryError, match='find backend fault'):
-            run_query(_FindErrorConnection(site), _query_for(schema, {}))
+            run_query(
+                FailingFindConnection(site, ShotgunError('find backend fault')),
+                _query_for(schema, {}),
+            )
 
     def test_backend_translation_uses_shared_provider_error_resolver(
         self,
@@ -115,7 +103,7 @@ class TestRecords:
             calls += 1
             return ResolvedProviderError
 
-        monkeypatch.setattr(execution, 'provider_error_type', resolve)
+        monkeypatch.setattr(engine_errors, 'provider_error_type', resolve)
 
         def fail(*_args: object, **_kwargs: object) -> object:
             raise ResolvedProviderError('resolved provider fault')
@@ -435,12 +423,12 @@ class TestSummarize:
                 {
                     'group_name': 'site-owned entity name',
                     'group_value': {'type': 'Shot', 'id': 7},
-                    'summaries': {'id': 3},
+                    'summaries': {'id': 71, 'sg_cut_in': 3},
                 },
                 {
                     'group_name': '',
                     'group_value': None,
-                    'summaries': {'id': 2},
+                    'summaries': {'id': 99, 'sg_cut_in': 2},
                 },
             ],
         }
@@ -450,7 +438,17 @@ class TestSummarize:
 
         monkeypatch.setattr(site, 'summarize', controlled_summarize)
 
-        result = run_query(site, _grouped_query(schema))
+        query = _query_for(
+            schema,
+            {
+                'fields': [],
+                'summarize': {
+                    'summary_fields': [{'field': 'sg_cut_in', 'type': 'sum'}],
+                    'grouping': [{'field': 'project'}],
+                },
+            },
+        )
+        result = run_query(site, query)
 
         assert result.kind == 'aggregate'
         assert result.aggregate == {'Shot:7': 3, '(none)': 2}
@@ -638,6 +636,28 @@ class TestSummarize:
         result = run_query(site, query)
         assert result.kind == 'aggregate'
         assert result.aggregate == _SHOT_COUNT
+
+    def test_ungrouped_summary_selects_the_requested_field(
+        self, loaded: _Loaded, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        site, schema = loaded
+
+        def controlled_summarize(*_args: object, **_options: object) -> object:
+            return {'summaries': {'id': 99, 'sg_cut_in': 71}}
+
+        monkeypatch.setattr(site, 'summarize', controlled_summarize)
+        query = _query_for(
+            schema,
+            {
+                'fields': [],
+                'summarize': {'summary_fields': [{'field': 'sg_cut_in', 'type': 'sum'}]},
+            },
+        )
+
+        result = run_query(site, query)
+
+        assert result.kind == 'aggregate'
+        assert result.aggregate == 71
 
 
 def _grouped_query(schema: SiteSchema) -> ValidatedQuery:

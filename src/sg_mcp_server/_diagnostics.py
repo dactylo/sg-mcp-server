@@ -202,11 +202,16 @@ class DiagnosticContext:
         if record is None:
             return
         written = False
+        detail: str | None = None
         with contextlib.suppress(Exception):
-            writer(record)
-            written = True
+            try:
+                writer(record)
+            except OSError as error:
+                detail = str(error)
+            else:
+                written = True
         if not written:
-            _warn_once('diagnostic write failed')
+            _warn_once('diagnostic write failed', detail)
 
     def provider_call(self) -> None:
         """Record one measured remote provider call."""
@@ -264,7 +269,13 @@ class DiagnosticSink:
         self._path = path
 
     def __call__(self, record: _DiagnosticRecord) -> None:
-        """Append one finalized record when diagnostics are enabled."""
+        """Append one finalized record when diagnostics are enabled.
+
+        Raises:
+            OSError: If creating the parent directory or appending the
+                diagnostic record fails. `DiagnosticContext.finish` handles
+                this failure when it invokes the sink.
+        """
         if self._path is None:
             return
         line = json.dumps(record, separators=(',', ':')) + '\n'
@@ -315,11 +326,15 @@ class ObservedConnection:
         Args:
             entity_type: Entity type to query.
             filters: SG filter expression.
-            fields: Fields to return.
+            fields: Fields to return, or `None` for provider defaults.
             **options: Supported SG `find` options.
 
         Returns:
             Matching SG records.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the provider's exception is propagated unchanged.
         """
         with self._context.span('provider_call'):
             self._context.provider_call()
@@ -330,6 +345,10 @@ class ObservedConnection:
 
         Returns:
             The SG entity-schema dump.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the provider's exception is propagated unchanged.
         """
         return self._connection.schema_entity_read()
 
@@ -348,6 +367,10 @@ class ObservedConnection:
 
         Returns:
             The targeted SG field-schema dump.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the provider's exception is propagated unchanged.
         """
         return self._connection.schema_field_read(entity_type, field_name, project_entity)
 
@@ -356,6 +379,10 @@ class ObservedConnection:
 
         Returns:
             The SG field-schema dump.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the provider's exception is propagated unchanged.
         """
         return self._connection.schema_read()
 
@@ -378,6 +405,10 @@ class ObservedConnection:
 
         Returns:
             The native SG summary response.
+
+        Raises:
+            Exception: If the provider rejects the read or transport fails;
+                the provider's exception is propagated unchanged.
         """
         with self._context.span('provider_call'):
             self._context.provider_call()
@@ -434,11 +465,14 @@ def _next_request_id() -> int:
         return next(_REQUEST_IDS)
 
 
-def _warn_once(category: _FailureCategory) -> None:
+def _warn_once(category: _FailureCategory, detail: str | None = None) -> None:
     """Emit one bounded warning for a fixed failure category."""
     with _STATE_LOCK:
         if category in _WARNING_CATEGORIES:
             return
         _WARNING_CATEGORIES.add(category)
     with contextlib.suppress(Exception):
-        print(f'warning: {category}', file=sys.stderr)
+        message = f'warning: {category}'
+        if detail is not None:
+            message = f'{message}: {detail}'
+        print(message, file=sys.stderr)

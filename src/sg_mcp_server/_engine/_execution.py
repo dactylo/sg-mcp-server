@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-import datetime
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
-from sg_mcp_server._engine._errors import QueryError, transport_query_error
-from sg_mcp_server._providers import provider_error_type, provider_transport_error_types
+from sg_mcp_server._engine._errors import QueryError, provider_errors_as_query_errors
+from sg_mcp_server._providers import SG_SCALAR_TYPES
 
 if TYPE_CHECKING:
     from sg_mcp_server._engine._validation import ValidatedQuery
-    from sg_mcp_server._providers import SGReadConnection, SGRecord, SGValue
+    from sg_mcp_server._providers import SGReadConnection, SGRecord, SGValue, SummaryRequest
 
 QueryResult: TypeAlias = '_AggregateQueryResult | _RecordsQueryResult'
 
@@ -66,10 +65,8 @@ def _find(
     query: ValidatedQuery,
     limit: int,
 ) -> object:
-    """One find call with backend faults translated to QueryError."""
-    shotgun_error = provider_error_type()
-    transport_errors = provider_transport_error_types()
-    try:
+    """One find call with backend faults translated to `QueryError`."""
+    with provider_errors_as_query_errors():
         return connection.find(
             query.entity_type,
             query.filters,
@@ -79,10 +76,6 @@ def _find(
             limit=limit,
             retired_only=query.retired_only,
         )
-    except shotgun_error as error:
-        raise QueryError(str(error)) from error
-    except transport_errors as error:
-        raise transport_query_error(error) from error
 
 
 def _provider_mapping(value: object, label: str) -> dict[str, object]:
@@ -97,10 +90,7 @@ def _provider_mapping(value: object, label: str) -> dict[str, object]:
 
 def _provider_value(value: object, label: str) -> SGValue:
     """Narrow one recursive provider value or raise a bounded query error."""
-    if value is None or isinstance(
-        value,
-        (bool, int, float, str, datetime.date, datetime.datetime),
-    ):
+    if value is None or isinstance(value, SG_SCALAR_TYPES):
         return value
     if isinstance(value, list):
         return [_provider_value(item, label) for item in cast('list[object]', value)]
@@ -182,13 +172,12 @@ def _run_records(connection: SGReadConnection, query: ValidatedQuery) -> QueryRe
     )
 
 
-def _run_summarize(connection: SGReadConnection, query: ValidatedQuery) -> QueryResult:
+def _run_summarize(
+    connection: SGReadConnection, query: ValidatedQuery, block: SummaryRequest
+) -> QueryResult:
     """Run a native summary query and translate its provider response."""
-    shotgun_error = provider_error_type()
-    transport_errors = provider_transport_error_types()
-    block = query.summarize or {}
     summary_field = block['summary_fields'][0]['field']
-    try:
+    with provider_errors_as_query_errors():
         response = connection.summarize(
             query.entity_type,
             query.filters,
@@ -196,10 +185,6 @@ def _run_summarize(connection: SGReadConnection, query: ValidatedQuery) -> Query
             filter_operator=query.filter_operator,
             grouping=block.get('grouping'),
         )
-    except shotgun_error as error:
-        raise QueryError(str(error)) from error
-    except transport_errors as error:
-        raise transport_query_error(error) from error
     response_mapping = _provider_mapping(response, 'provider summary response')
     summaries = _provider_record(
         response_mapping.get('summaries'),
@@ -242,5 +227,5 @@ def run_query(connection: SGReadConnection, query: ValidatedQuery) -> QueryResul
             value, or distinct summary groups produce the same result key.
     """
     if query.summarize is not None:
-        return _run_summarize(connection, query)
+        return _run_summarize(connection, query, query.summarize)
     return _run_records(connection, query)

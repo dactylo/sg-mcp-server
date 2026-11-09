@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """Run a safe, read-only smoke test against the live MCP server.
 
 Run `python scripts/smoke_test_live.py` from the repository root with
@@ -18,7 +17,7 @@ import dataclasses
 import os
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from mcp import ClientSession, MCPError, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
@@ -43,12 +42,12 @@ class _SmokeConfigurationError(RuntimeError):
 class _SmokeSummary:
     """Contain only non-sensitive live smoke measurements."""
 
-    _server_name: str
-    _tool_names: tuple[str, ...]
-    _entity_type_count: int
-    _project_row_count: int
-    _query_error: bool
-    _get_error: bool | None
+    server_name: str
+    tool_names: tuple[str, ...]
+    entity_type_count: int
+    project_row_count: int
+    query_error: bool
+    get_error: bool | None
 
 
 def _failure_message(error: BaseException) -> str | None:
@@ -75,12 +74,12 @@ def _failure_message(error: BaseException) -> str | None:
 
 def _print_summary(summary: _SmokeSummary) -> None:
     """Print only the approved non-sensitive summary fields."""
-    print(f'server_name: {summary._server_name}')
-    print(f'tool_names: {", ".join(summary._tool_names)}')
-    print(f'entity_type_count: {summary._entity_type_count}')
-    print(f'project_row_count: {summary._project_row_count}')
-    print(f'query_error: {summary._query_error}')
-    print(f'get_error: {summary._get_error}')
+    print(f'server_name: {summary.server_name}')
+    print(f'tool_names: {", ".join(summary.tool_names)}')
+    print(f'entity_type_count: {summary.entity_type_count}')
+    print(f'project_row_count: {summary.project_row_count}')
+    print(f'query_error: {summary.query_error}')
+    print(f'get_error: {summary.get_error}')
 
 
 def _required_environment() -> dict[str, str]:
@@ -102,28 +101,32 @@ def _server_parameters() -> StdioServerParameters:
     )
 
 
-def _structured_mapping(result: types.CallToolResult, tool_name: str) -> dict[str, Any]:
+def _structured_mapping(result: types.CallToolResult, tool_name: str) -> dict[str, object]:
     """Return one tool's structured mapping or reject its response shape."""
     structured = result.structured_content
     if not isinstance(structured, dict):
         raise _MalformedResponseError(f'{tool_name} returned malformed structured content')
-    return cast('dict[str, Any]', structured)
+    return cast('dict[str, object]', structured)
 
 
-def _entity_types(result: object) -> list[str]:
-    """Return the enumerated entity types from a successful schema probe."""
+def _entity_type_count(result: object) -> int:
+    """Return the site's total entity-type count from a successful schema probe."""
     if not isinstance(result, types.CallToolResult) or result.is_error:
         raise _MalformedResponseError('sg_schema did not return a successful tool result')
-    candidate_entity_types = _structured_mapping(result, 'sg_schema').get('entity_types')
+    structured = _structured_mapping(result, 'sg_schema')
+    candidate_entity_types = structured.get('entity_types')
     if not isinstance(candidate_entity_types, list):
         raise _MalformedResponseError('sg_schema returned malformed entity types')
     entity_types = cast('list[object]', candidate_entity_types)
     if not all(isinstance(entity_type, str) for entity_type in entity_types):
         raise _MalformedResponseError('sg_schema returned malformed entity types')
-    return cast('list[str]', entity_types)
+    total = structured.get('total')
+    if type(total) is not int or total < len(entity_types):
+        raise _MalformedResponseError('sg_schema returned malformed entity types')
+    return total
 
 
-async def _get_error(session: ClientSession, records: list[dict[str, Any]]) -> bool | None:
+async def _get_error(session: ClientSession, records: list[dict[str, object]]) -> bool | None:
     """Probe `sg_get` for the first Project, when one exists."""
     if not records:
         return None
@@ -139,7 +142,7 @@ async def _get_error(session: ClientSession, records: list[dict[str, Any]]) -> b
     return result.is_error
 
 
-def _project_records(result: object) -> tuple[list[dict[str, Any]], bool]:
+def _project_records(result: object) -> tuple[list[dict[str, object]], bool]:
     """Return Project records and the query error flag."""
     if not isinstance(result, types.CallToolResult):
         raise _MalformedResponseError('sg_query did not return a tool result')
@@ -151,7 +154,7 @@ def _project_records(result: object) -> tuple[list[dict[str, Any]], bool]:
     records = cast('list[object]', candidate_records)
     if not all(isinstance(record, dict) for record in records):
         raise _MalformedResponseError('sg_query returned malformed records')
-    return cast('list[dict[str, Any]]', records), False
+    return cast('list[dict[str, object]]', records), False
 
 
 async def _probe_session(session: ClientSession) -> _SmokeSummary:
@@ -163,7 +166,7 @@ async def _probe_session(session: ClientSession) -> _SmokeSummary:
         raise _MalformedResponseError('unexpected MCP tool set')
 
     schema_result = await session.call_tool('sg_schema', {'op': 'entities'})
-    entity_types = _entity_types(schema_result)
+    entity_type_count = _entity_type_count(schema_result)
 
     query_result = await session.call_tool(
         'sg_query',
@@ -179,12 +182,12 @@ async def _probe_session(session: ClientSession) -> _SmokeSummary:
     get_error = await _get_error(session, records)
 
     return _SmokeSummary(
-        _server_name=initialized.server_info.name,
-        _tool_names=tool_names,
-        _entity_type_count=len(entity_types),
-        _project_row_count=len(records),
-        _query_error=query_error,
-        _get_error=get_error,
+        server_name=initialized.server_info.name,
+        tool_names=tool_names,
+        entity_type_count=entity_type_count,
+        project_row_count=len(records),
+        query_error=query_error,
+        get_error=get_error,
     )
 
 
@@ -219,7 +222,7 @@ def _main() -> int:
         return 1
 
     _print_summary(summary)
-    if summary._query_error or summary._get_error is True:
+    if summary.query_error or summary.get_error is True:
         return 1
     return 0
 

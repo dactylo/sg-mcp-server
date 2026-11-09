@@ -15,7 +15,6 @@ from sg_mcp_server._engine._validation import (
     ValidatedQuery,
     _resolve_field,
     validate_query,
-    validate_with_refresh,
     validate_with_schema,
 )
 
@@ -27,9 +26,6 @@ _ENTITY_NAME_OPERATORS = (
     'name_starts_with',
 )
 _ENTITY_TYPE_OPERATORS = ('type_is', 'type_is_not')
-_NOW = datetime.datetime.fromisoformat('2026-07-31T12:00:00+00:00')
-_UNHASHABLE_ARRAY: object = []
-_UNHASHABLE_OBJECT: object = {}
 _NON_FILTERABLE_TYPES: frozenset[str] = frozenset(
     {
         'calculated',
@@ -46,6 +42,9 @@ _NON_FILTERABLE_TYPES: frozenset[str] = frozenset(
         'uuid',
     }
 )
+_NOW = datetime.datetime.fromisoformat('2026-07-31T12:00:00+00:00')
+_UNHASHABLE_ARRAY: object = []
+_UNHASHABLE_OBJECT: object = {}
 
 
 class TestBareConditionDiagnostic:
@@ -292,15 +291,16 @@ class TestFilterGrounding:
             _run(schema, {'entity_type': 'Shot', 'filters': [condition]})
 
     @pytest.mark.parametrize('operator', ['is', 'is_not'])
-    def test_null_still_legal_for_is_and_is_not(
+    def test_null_is_preserved_for_is_and_is_not(
         self,
         schema: SiteSchema,
         operator: str,
     ) -> None:
-        _run(
+        query = _run(
             schema,
             {'entity_type': 'Shot', 'filters': [['description', operator, None]]},
         )
+        assert query.filters == [['description', operator, None]]
 
     def test_two_hop_suggestions_keep_the_terminal_entity(self, schema: SiteSchema) -> None:
         with pytest.raises(ValidationError) as caught:
@@ -399,10 +399,38 @@ class TestHappyPath:
             tzinfo=datetime.UTC,
         )
 
-    def test_dictionary_payload_remains_supported(self, schema: SiteSchema) -> None:
-        payload: dict[str, object] = {'entity_type': 'Shot', 'filters': []}
+    def test_date_field_calendar_relation_becomes_a_week_of_date_strings(
+        self, schema: SiteSchema
+    ) -> None:
+        payload: dict[str, object] = {
+            'entity_type': 'Task',
+            'filters': [['start_date', 'in_calendar_week', 0]],
+            'fields': ['content'],
+        }
 
-        assert _run(schema, payload).entity_type == 'Shot'
+        query = _run(schema, payload)
+
+        condition = query.filters[0]
+        assert isinstance(condition, list)
+        assert condition[:2] == ['start_date', 'between']
+        start, end = condition[2:]
+        assert isinstance(start, str)
+        assert isinstance(end, str)
+        start_day = datetime.date.fromisoformat(start)
+        end_day = datetime.date.fromisoformat(end)
+        assert start_day <= _NOW.date() <= end_day
+        assert end_day - start_day == datetime.timedelta(days=6)
+
+    def test_date_field_keeps_iso_date_operand_as_string(self, schema: SiteSchema) -> None:
+        payload: dict[str, object] = {
+            'entity_type': 'Task',
+            'filters': [['start_date', 'is', '2026-07-31']],
+            'fields': ['content'],
+        }
+
+        query = _run(schema, payload)
+
+        assert query.filters == [['start_date', 'is', '2026-07-31']]
 
     def test_dst_gap_wall_time_is_rejected(self, schema: SiteSchema) -> None:
         zone = ZoneInfo('America/Los_Angeles')
@@ -1019,8 +1047,20 @@ class TestStructuralFailures:
             _run(schema, payload)
         assert info.value.unknown_name is False
 
+    @pytest.mark.parametrize('value', ['31/07/2026', 20260731])
+    def test_date_field_rejects_non_iso_operand(self, schema: SiteSchema, value: object) -> None:
+        payload: dict[str, object] = {
+            'entity_type': 'Task',
+            'filters': [['start_date', 'is', value]],
+            'fields': ['content'],
+        }
 
-class TestValidateWithRefresh:
+        with pytest.raises(ValidationError, match=r'Task\.start_date') as info:
+            _run(schema, payload)
+        assert info.value.unknown_name is False
+
+
+class TestValidateWithSchemaRefresh:
     @pytest.mark.parametrize(
         'field',
         [
@@ -1046,7 +1086,7 @@ class TestValidateWithRefresh:
 
         monkeypatch.setattr(cache, 'refresh', tracked_refresh)
         with pytest.raises(ValidationError) as caught:
-            validate_with_refresh(
+            validate_with_schema(
                 cache,
                 {'entity_type': 'Task', 'filters': [], 'fields': [field]},
                 default_limit=50,
@@ -1074,7 +1114,7 @@ class TestValidateWithRefresh:
 
         monkeypatch.setattr(cache, 'refresh', tracked_refresh)
         with pytest.raises(ValidationError):
-            validate_with_refresh(
+            validate_with_schema(
                 cache,
                 {'entity_type': 'Shot', 'filters': [], 'fields': ['still_missing']},
                 default_limit=50,
@@ -1095,7 +1135,7 @@ class TestValidateWithRefresh:
 
         monkeypatch.setattr(cache, 'refresh', fail_refresh)
         with pytest.raises(ValidationError):
-            validate_with_refresh(
+            validate_with_schema(
                 cache,
                 {'entity_type': 'Shot', 'filters': [['code']]},
                 default_limit=50,

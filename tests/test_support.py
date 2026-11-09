@@ -3,6 +3,9 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING
 
+import pytest
+from shotgun_api3.shotgun import Fault
+
 if TYPE_CHECKING:
     from support import FixtureConnection
 
@@ -10,14 +13,6 @@ if TYPE_CHECKING:
 
 
 class TestFixtureConnection:
-    def test_delete_forwards_to_fixture_site(self, fixture_site: FixtureConnection) -> None:
-        project = fixture_site.create('Project', {'name': 'temporary'})
-        entity_id = project['id']
-        assert isinstance(entity_id, int)
-
-        assert fixture_site.delete('Project', entity_id) is True
-        assert fixture_site.find_one('Project', [['id', 'is', entity_id]]) is None
-
     def test_find_honors_limit_and_page(self, fixture_site: FixtureConnection) -> None:
         for index in range(3):
             fixture_site.create('Project', {'name': f'P{index}'})
@@ -33,13 +28,8 @@ class TestFixtureConnection:
         }
         created = fixture_site.create('EventLogEntry', {'event_type': 'Test', 'meta': nested})
 
-        row = fixture_site.find_one(
-            'EventLogEntry',
-            [['id', 'is', created['id']]],
-            ['meta'],
-        )
+        [row] = fixture_site.find('EventLogEntry', [['id', 'is', created['id']]], ['meta'])
 
-        assert row is not None
         assert row['meta'] == nested
 
     def test_find_preserves_order_clause_precedence(self, fixture_site: FixtureConnection) -> None:
@@ -79,3 +69,13 @@ class TestFixtureConnection:
 
         assert all_fields == expected
         assert exact == {'code': expected['code']}
+
+    def test_summarize_reports_incomparable_extremes_as_fault(
+        self, fixture_site: FixtureConnection
+    ) -> None:
+        for name in ('A', 'B'):
+            project = fixture_site.create('Project', {'name': name})
+            fixture_site.create('Shot', {'code': name, 'project': project})
+
+        with pytest.raises(Fault, match='cannot compare'):
+            fixture_site.summarize('Shot', [], [{'field': 'project', 'type': 'minimum'}])

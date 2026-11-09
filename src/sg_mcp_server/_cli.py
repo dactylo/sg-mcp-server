@@ -41,7 +41,8 @@ disconnects. Set these environment variables in the client's configuration:
   SG_MCP_SCHEMA_TTL_SECONDS  seconds to reuse the cached schema (default: 900)
   SG_MCP_TIMEOUT_SECONDS     seconds to wait on the SG site (default: 60)
 
-See "Settings" in the usage guide, docs/usage.md, for details."""
+See "Settings" in the usage guide for details:
+https://github.com/dactylo/sg-mcp-server/blob/main/docs/usage.md#settings"""
 _METADATA_MISSING = 'installed distribution metadata for sg-mcp-server is unavailable'
 _SG_CLIENT_MODULE = 'shotgun_api3'
 
@@ -73,7 +74,13 @@ class _ProtocolInput(anyio.AsyncFile[str]):
             yield line
 
     async def readline(self) -> str:
-        """Return the next line, or an empty string once the client ends its input."""
+        """Return the next line, or an empty string once the client ends its input.
+
+        Raises:
+            Exception: If reading standard input fails with an operating-system
+                error; the original error is retained as the cause.
+            ValueError: If the input stream is closed when it is read.
+        """
         loop = asyncio.get_running_loop()
         line: asyncio.Future[str] = loop.create_future()
 
@@ -248,18 +255,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the sg-mcp-server command-line interface.
 
     With no arguments, serve the read-only tools to one MCP client over
-    standard input and output. `--version` writes the installed version and
-    returns 0. `--help` and invalid arguments end in `SystemExit` from argument
-    parsing. A client disconnect, the end of input, and an interrupt while
-    serving each stop the server with status 0, once calls in progress finish.
-    If the reader closes standard output, unwritten output is discarded while
-    the status still reports the result.
+    standard input and output. `--version` writes the installed version.
+    A client disconnect, the end of input, and an interrupt while serving stop
+    the server normally once calls in progress finish. If the reader closes
+    standard output, unwritten output is discarded while the status still
+    reports the result.
 
     Args:
         argv: Arguments to parse, or `None` to use `sys.argv`.
 
     Returns:
-        The process exit status.
+        Zero after a normal stop or successful version output; 2 for
+        unavailable standard output, invalid configuration, a missing SG
+        client, or unavailable distribution metadata; or 130 for an interrupt
+        outside serving.
+
+    Raises:
+        SystemExit: For `--help` or rejected command-line arguments.
+        ModuleNotFoundError: If startup cannot import a dependency other than
+            the optional SG client.
+        OSError: If an unhandled stream write, flush, or descriptor operation
+            fails.
+        Exception: If serving fails for another reason; exception groups retain
+            their original contents.
     """
     if sys.stdout is None:
         # Started with standard output closed: nothing can be delivered.

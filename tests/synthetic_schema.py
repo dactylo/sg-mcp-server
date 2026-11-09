@@ -1,14 +1,6 @@
 import pickle
 from pathlib import Path
 
-_FIELD_TOTALS = {'Shot': 81, 'Task': 59}
-_STATUSES: dict[str, dict[str, str]] = {
-    'active': {'act': 'Active', 'dis': 'Disabled'},
-    'attachment': {'na': 'N/A', 'fin': 'Final'},
-    'note': {'opn': 'Open', 'ip': 'In Progress', 'clsd': 'Closed'},
-    'production': {'wtg': 'Waiting to Start', 'ip': 'In Progress', 'fin': 'Final'},
-    'review': {'na': 'N/A', 'rev': 'Pending Review', 'apr': 'Approved'},
-}
 # Field name -> (data type, label, detail). Detail identifies linked entity types or statuses.
 _ENTITIES: dict[str, dict[str, tuple[str, str, tuple[str, ...] | str | None]]] = {
     'Asset': {
@@ -123,6 +115,14 @@ _ENTITIES: dict[str, dict[str, tuple[str, str, tuple[str, ...] | str | None]]] =
         'updated_at': ('date_time', 'Date Updated', None),
     },
 }
+_FIELD_TOTALS = {'Shot': 81, 'Task': 59}
+_STATUSES: dict[str, dict[str, str]] = {
+    'active': {'act': 'Active', 'dis': 'Disabled'},
+    'attachment': {'na': 'N/A', 'fin': 'Final'},
+    'note': {'opn': 'Open', 'ip': 'In Progress', 'clsd': 'Closed'},
+    'production': {'wtg': 'Waiting to Start', 'ip': 'In Progress', 'fin': 'Final'},
+    'review': {'na': 'N/A', 'rev': 'Pending Review', 'apr': 'Approved'},
+}
 
 
 def _envelope(value: object, *, editable: bool = True) -> dict[str, object]:
@@ -166,7 +166,7 @@ def _field(
     }
 
 
-def build_schema() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+def _build_schema() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
     fields: dict[str, dict[str, object]] = {}
     entities: dict[str, dict[str, object]] = {}
     for entity_type, declared_fields in _ENTITIES.items():
@@ -190,7 +190,7 @@ def write_schema_pickles(directory: Path) -> tuple[Path, Path]:
     directory.mkdir(parents=True, exist_ok=True)
     fields_path = directory / 'synthetic-schema-fields.pickle'
     entities_path = directory / 'synthetic-schema-entities.pickle'
-    fields, entities = build_schema()
+    fields, entities = _build_schema()
     with fields_path.open('wb') as handle:
         pickle.dump(fields, handle)
     with entities_path.open('wb') as handle:

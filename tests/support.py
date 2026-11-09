@@ -19,7 +19,7 @@ from sg_mcp_server._providers import (
     ValidatedFilters,
 )
 
-FIXTURE_BASE_URL = 'https://fixture.shotgunstudio.com'
+_FIXTURE_BASE_URL = 'https://fixture.shotgunstudio.com'
 
 
 class Clock:
@@ -36,9 +36,6 @@ class FixtureConnection:
 
     def create(self, entity_type: str, data: SGRecord) -> SGRecord:
         return self.site.create(entity_type, data)
-
-    def delete(self, entity_type: str, entity_id: int) -> bool:
-        return self.site.delete(entity_type, entity_id)
 
     def find(
         self,
@@ -68,15 +65,6 @@ class FixtureConnection:
             return rows
         start = (max(page, 1) - 1) * limit
         return rows[start : start + limit]
-
-    def find_one(
-        self,
-        entity_type: str,
-        filters: ValidatedFilters,
-        fields: list[str] | None = None,
-    ) -> SGRecord | None:
-        rows = self.find(entity_type, filters, fields, limit=1)
-        return rows[0] if rows else None
 
     def schema_entity_read(self) -> RawSchema:
         return self.site.schema_entity_read()
@@ -114,6 +102,22 @@ class FixtureConnection:
         )
 
 
+class FailingFindConnection(FixtureConnection):
+    def __init__(self, source: FixtureConnection, failure: Exception) -> None:
+        super().__init__(source.site)
+        self._failure = failure
+
+    def find(
+        self,
+        entity_type: str,
+        filters: ValidatedFilters,
+        fields: list[str] | None = None,
+        **options: Unpack[FindOptions],
+    ) -> list[SGRecord]:
+        del entity_type, filters, fields, options
+        raise self._failure
+
+
 class _MockgunFindOptions(TypedDict):
     fields: list[str]
     order: list[dict[str, str]] | None
@@ -123,8 +127,6 @@ class _MockgunFindOptions(TypedDict):
 
 class _MockgunSite(Protocol):
     def create(self, entity_type: str, data: SGRecord) -> SGRecord: ...
-
-    def delete(self, entity_type: str, entity_id: int) -> bool: ...
 
     def find(
         self,
@@ -187,5 +189,7 @@ def new_fixture_site(schema_paths: tuple[Path, Path] | None = None) -> FixtureCo
     fields, entities = _synthetic_schema_paths() if schema_paths is None else schema_paths
     schema_path_owner = cast('_SchemaPathOwner', MockgunShotgun)
     schema_path_owner.set_schema_paths(str(fields), str(entities))
-    site = cast('_MockgunSite', MockgunShotgun(FIXTURE_BASE_URL, script_name='tests', api_key='x'))
+    site = cast(
+        '_MockgunSite', MockgunShotgun(_FIXTURE_BASE_URL, script_name='tests', api_key='x')
+    )
     return FixtureConnection(site)

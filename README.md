@@ -45,8 +45,7 @@ uv tool install '.[official]'
 ```
 
 The `official` extra installs `shotgun-api3`, the Autodesk Python API the server uses to reach your
-site. The base package does not include an SG client; without one, the server stops at startup with
-an error that names the `official` extra.
+site.
 
 After updating the checkout, update the installed command:
 
@@ -80,14 +79,9 @@ JSON shape; place it where your client expects MCP servers:
 }
 ```
 
-Replace the three values with your site's address, script name, and API key. `SG_MCP_SITE_URL` must
-be the bare HTTPS site address, with no path, query, or fragment. Restart or reconnect the client
-so that it starts the server; the server runs until the client disconnects.
-
-The server checks its settings when it starts and stops with a one-line `error:` message if one is
-missing or invalid; [Troubleshooting](docs/usage.md#troubleshooting) lists the causes. It does not
-contact your site until the first tool call, so a wrong key or an unreachable site appears as an
-error on your first question, not as a startup failure.
+Replace the three values with your site's address, script name, and API key. Use the bare HTTPS
+site address, such as `https://yoursite.shotgunstudio.com`. Restart or reconnect the client so that
+it starts the server; the server runs until the client disconnects.
 
 ### Ask your first question
 

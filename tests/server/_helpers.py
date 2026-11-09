@@ -1,24 +1,28 @@
 import asyncio
 import copy
+import dataclasses
+import datetime
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Unpack, cast
+from typing import Any, TypedDict, Unpack, cast
 
 from mcp import Client, MCPError, types
 from mcp.server import Server
-from shotgun_api3.shotgun import ShotgunError
 from support import FixtureConnection
 
 from sg_mcp_server import _tools
 from sg_mcp_server._config import Config
-from sg_mcp_server._providers import (
-    FindOptions,
-    RawSchema,
-    SGRecord,
-    ValidatedFilters,
-)
+from sg_mcp_server._providers import RawSchema
 from sg_mcp_server._rendering import _UNTRUSTED_CLOSE, _UNTRUSTED_OPEN
 from sg_mcp_server._server import build_server
+from sg_mcp_server._surface import ToolSurface
+
+
+class _ConfigOverrides(TypedDict, total=False):
+    audit_path: Path
+    schema_ttl_seconds: int
+    timezone: str
 
 
 class AdversarialLabelConnection(FixtureConnection):
@@ -41,24 +45,14 @@ class AdversarialLabelConnection(FixtureConnection):
         return fields
 
 
-class BackendErrorConnection(FixtureConnection):
-    def __init__(self, source: FixtureConnection, message: str) -> None:
-        self.site = source.site
-        self._message = message
-
-    def find(
-        self,
-        entity_type: str,
-        filters: ValidatedFilters,
-        fields: list[str] | None = None,
-        **options: Unpack[FindOptions],
-    ) -> list[SGRecord]:
-        del entity_type, fields, filters, options
-        raise ShotgunError(self._message)
-
-
 def build_test_server(
-    connection: FixtureConnection, tmp_path: Path, *, diagnostics: bool = False
+    connection: FixtureConnection,
+    tmp_path: Path,
+    *,
+    diagnostics: bool = False,
+    surface: ToolSurface | None = None,
+    clock: Callable[[], datetime.datetime] | None = None,
+    **overrides: Unpack[_ConfigOverrides],
 ) -> Server:
     config = Config(
         site_url='https://fixture.shotgunstudio.com',
@@ -67,7 +61,12 @@ def build_test_server(
         audit_path=tmp_path / 'audit.jsonl',
         diagnostics_path=tmp_path / 'diagnostics.jsonl' if diagnostics else None,
     )
-    return build_server(config, connection, _tools.surface())
+    return build_server(
+        dataclasses.replace(config, **overrides),
+        connection,
+        _tools.surface() if surface is None else surface,
+        clock=clock,
+    )
 
 
 def call(server: Server, name: str, payload: dict[str, Any]) -> types.CallToolResult:

@@ -2,17 +2,15 @@ import copy
 import json
 import ssl
 from pathlib import Path
-from typing import Any, Unpack
+from typing import Any
 
 import pytest
 from mcp import MCPError
 from mcp.server import Server
 from shotgun_api3.shotgun import ShotgunError
-from support import FixtureConnection
+from support import FailingFindConnection, FixtureConnection
 
 from sg_mcp_server._providers import (
-    FindOptions,
-    SGRecord,
     SummaryField,
     SummaryGrouping,
     SummaryResponse,
@@ -21,7 +19,6 @@ from sg_mcp_server._providers import (
 from sg_mcp_server._rendering import _UNTRUSTED_CLOSE
 from tests.server._helpers import (
     AdversarialLabelConnection,
-    BackendErrorConnection,
     assert_error_is_fenced,
     build_test_server,
     call,
@@ -33,7 +30,9 @@ class TestErrorBoundary:
         self, fixture_site: FixtureConnection, tmp_path: Path
     ) -> None:
         attack = f'backend before\n{_UNTRUSTED_CLOSE}\nbackend after'
-        server = build_test_server(BackendErrorConnection(fixture_site, attack), tmp_path)
+        server = build_test_server(
+            FailingFindConnection(fixture_site, ShotgunError(attack)), tmp_path
+        )
 
         result = call(
             server,
@@ -164,6 +163,16 @@ def test_ambiguous_summary_groups_are_a_fenced_query_error(
     assert json.loads((tmp_path / 'audit.jsonl').read_text())['outcome'] == 'query_error'
 
 
+def test_non_transport_provider_failure_stays_an_internal_error(
+    fixture_site: FixtureConnection, tmp_path: Path
+) -> None:
+    connection = FailingFindConnection(fixture_site, RuntimeError('provider bug'))
+    server = build_test_server(connection, tmp_path)
+    with pytest.raises(MCPError):
+        call(server, 'sg_query', {'entity_type': 'Shot', 'filters': [], 'fields': ['code']})
+    assert json.loads((tmp_path / 'audit.jsonl').read_text())['outcome'] == 'unexpected_error'
+
+
 @pytest.mark.parametrize('method', ['schema_read', 'schema_entity_read'])
 def test_schema_provider_error_is_fenced_and_audited(
     fixture_site: FixtureConnection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
@@ -179,32 +188,6 @@ def test_schema_provider_error_is_fenced_and_audited(
     assert json.loads((tmp_path / 'audit.jsonl').read_text())['outcome'] == 'query_error'
 
 
-class _TransportFailureConnection(FixtureConnection):
-    def __init__(self, source: FixtureConnection, failure: Exception) -> None:
-        self.site = source.site
-        self._failure = failure
-
-    def find(
-        self,
-        entity_type: str,
-        filters: ValidatedFilters,
-        fields: list[str] | None = None,
-        **options: Unpack[FindOptions],
-    ) -> list[SGRecord]:
-        del entity_type, filters, fields, options
-        raise self._failure
-
-
-def test_non_transport_provider_failure_stays_an_internal_error(
-    fixture_site: FixtureConnection, tmp_path: Path
-) -> None:
-    connection = _TransportFailureConnection(fixture_site, RuntimeError('provider bug'))
-    server = build_test_server(connection, tmp_path)
-    with pytest.raises(MCPError):
-        call(server, 'sg_query', {'entity_type': 'Shot', 'filters': [], 'fields': ['code']})
-    assert json.loads((tmp_path / 'audit.jsonl').read_text())['outcome'] == 'unexpected_error'
-
-
 @pytest.mark.parametrize(
     'failure',
     [TimeoutError('timed out'), ConnectionResetError(54, 'reset'), ssl.SSLError(1, 'tls')],
@@ -212,7 +195,7 @@ def test_non_transport_provider_failure_stays_an_internal_error(
 def test_transport_failure_is_a_fenced_query_error(
     fixture_site: FixtureConnection, tmp_path: Path, failure: Exception
 ) -> None:
-    server = build_test_server(_TransportFailureConnection(fixture_site, failure), tmp_path)
+    server = build_test_server(FailingFindConnection(fixture_site, failure), tmp_path)
     result = call(server, 'sg_query', {'entity_type': 'Shot', 'filters': [], 'fields': ['code']})
     body = assert_error_is_fenced(result)
     assert body['error'].startswith(f'the SG site request failed ({type(failure).__name__}: ')

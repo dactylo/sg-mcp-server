@@ -124,10 +124,12 @@ def _reduce_records(records: list[SGRecord], operation: str, field: str | None) 
         return sum(numeric_values)
     if operation == 'avg':
         return sum(numeric_values) / len(numeric_values)
-    ordered_values = cast('list[str]', values)
-    if operation == 'min':
-        return _scalar_value(min(ordered_values))
-    return _scalar_value(max(ordered_values))
+    ordered_values = cast('list[datetime.date | float | int | str]', values)
+    try:
+        extreme = min(ordered_values) if operation == 'min' else max(ordered_values)
+    except TypeError as error:
+        raise _AggregateError(f'{operation} cannot compare the values of {field}') from error
+    return _scalar_value(extreme)
 
 
 def _native_groups(

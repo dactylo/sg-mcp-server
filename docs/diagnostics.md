@@ -1,13 +1,9 @@
 # Latency diagnostics
 
-Use this guide when a request through sg-mcp-server feels slow and you want to know where the
-server spends the time: validating arguments, waiting for the shared SG connection, reading the
-schema, calling SG, rendering the result, or writing the security audit. If you have not set up the
-server yet, start with the [README quick start](../README.md#quick-start).
-
-Diagnostics are an optional stream of timings and bounded counters, written as one JSON line per
-completed request. They contain no credentials, query arguments, or site data. The stream is
-separate from the security audit and is off by default.
+Enable latency diagnostics to find where a slow request spends its time. The server writes optional
+timings and counters as one JSON line per completed request. Diagnostics are off by default,
+contain no credentials, query arguments, or site data, and are separate from the security audit.
+For initial setup, see the [README quick start](../README.md#quick-start).
 
 | If you want to...                                  | Start here                                                      |
 | -------------------------------------------------- | --------------------------------------------------------------- |
@@ -18,17 +14,6 @@ separate from the security audit and is off by default.
 | Share diagnostic output safely                     | [Keep diagnostic files private](#keep-diagnostic-files-private) |
 | Look up a record field, phase, or counter          | [Diagnostic record format](#diagnostic-record-format)           |
 | Look up a field in the probe's `summary.json` file | [Probe summary format](#probe-summary-format)                   |
-
-## Quick workflow
-
-1. Set `SG_MCP_DIAGNOSTICS_PATH` to a private JSONL file and restart the server through your MCP
-   client.
-2. Ask a question that uses one of the three tools, then look at the last line of that file.
-3. Check `outcome` first. For a successful request, compare `duration_ms` with the largest values
-   in `phases_ms`, then check `schema_cache` and `provider_call_count` to see whether a schema read
-   or remote SG calls contributed.
-4. For repeatable timings you can compare across runs, use the
-   [read-only live probe](#run-the-read-only-live-probe).
 
 ## Enable diagnostics
 
@@ -45,24 +30,29 @@ the three required connection settings, then restart or reconnect the client:
 ```
 
 Use an absolute path outside any Git repository, so the file is never committed by accident. The
-server does not expand `~`. Diagnostics stay off when the variable is unset, empty, or whitespace.
+server expands a leading `~` and refuses to start with a relative path. Diagnostics stay off when
+the variable is unset, empty, or whitespace.
 
-The server appends one line per completed request, including rejected ones. If it cannot measure or
-write a record, it prints `warning: diagnostic accounting failed` or
-`warning: diagnostic write failed` to standard error once and keeps serving; the tool result and
-the security audit are unaffected. Diagnostics never replace or change the security audit at
-`SG_MCP_AUDIT_PATH`.
+The server appends one line per completed request, including rejected ones. If measurement or
+writing fails, it keeps serving and prints the corresponding warning to standard error once:
+
+- `warning: diagnostic accounting failed`
+- `warning: diagnostic write failed`
+
+A write failure reported by the operating system adds its error text, such as a missing directory
+or a denied permission. The tool result and the security audit are unaffected. Diagnostics never
+replace or change the security audit at `SG_MCP_AUDIT_PATH`.
 
 ## Read a request
 
-Display the latest record:
+Ask a question through your MCP client, then display the latest record:
 
 ```sh
 tail -n 1 /path/to/private/requests.jsonl
 ```
 
-This record, formatted for reading, comes from a local test site where remote calls are nearly
-instant; on a live site, the remote phases take much longer:
+For example, a successful query record has this shape. These example durations are not a
+performance target:
 
 ```json
 {
@@ -92,10 +82,11 @@ instant; on a live site, the remote phases take much longer:
 }
 ```
 
-This was the server's first request, so the schema cache missed and the server read the schema from
-SG: two remote calls, plus one `find` call for the query, give `provider_call_count` 3.
+Check `outcome` first, then compare `duration_ms` with the largest values in `phases_ms`. In this
+example, a cache miss requires two schema calls and one `find` call, giving
+`provider_call_count: 3`.
 
-Use the largest phase to decide where to look:
+Use the phases to decide where to look:
 
 | What you see                    | What it means                                                                                                                                                                                   |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -106,8 +97,73 @@ Use the largest phase to decide where to look:
 | `unattributed_ms` is large      | The time went to server work outside the named phases, such as dispatch and thread scheduling.                                                                                                  |
 
 A phase the request never entered is absent; for example, a cache hit has no `schema_reflection`.
-An absent or small phase describes this request only; it does not show that SG or the network is
-fast in general.
+An absent or small phase describes this request only. See
+[What each duration measures](#what-each-duration-measures) before comparing server, audit, and
+client timings. To compare repeated requests, [run the probe](#run-the-read-only-live-probe).
+
+## Run the read-only live probe
+
+The probe measures repeated, comparable timings against your live site. It is a script in this
+repository, so it needs a development checkout set up with `make setup`, which requires the uv
+version listed in the [development guide](development.md#local-environment). Setup creates `.venv`
+with the server's dependencies and the official SG client. The probe runs the checkout's own code,
+not your installed `sg-mcp-server`.
+
+From the repository root, with `SG_MCP_SITE_URL`, `SG_MCP_SCRIPT_NAME`, and `SG_MCP_API_KEY` set in
+your environment, run:
+
+```sh
+.venv/bin/python scripts/diagnose_live_latency.py \
+    --output-dir /path/to/private/latency-run-001 \
+    --repeats 5
+```
+
+The command above uses the Linux/macOS environment path. On Windows, use `.venv/Scripts/python.exe`
+instead of `.venv/bin/python`.
+
+- `--output-dir` must name a new directory whose parent already exists. The probe refuses an
+  existing directory and checks that the new one ends up holding exactly its own files. Choose a
+  location outside the checkout so the output is never committed.
+- `--repeats` sets how many times each operation runs, including the first sample. It accepts `2`
+  through `20` and defaults to `5`.
+
+The probe starts one server process, opens one MCP session, and lists the tools once. For each
+repeat, it runs an `sg_schema` entity listing, an `sg_schema` description of Project, and an
+`sg_query` for one Project. If the first query returns a Project, it then runs one `sg_get` for it.
+It never refreshes the schema explicitly and makes no changes to your site. So that runs are
+comparable regardless of your own settings, the probe's server uses a schema TTL of `3600` seconds,
+a default limit of `50`, and a hard limit of `200`.
+
+| Exit status | Meaning                                                                          |
+| ----------- | -------------------------------------------------------------------------------- |
+| `0`         | The run succeeded.                                                               |
+| `1`         | A handled failure; standard error starts with `live latency diagnostic failed:`. |
+| `2`         | Invalid command-line arguments.                                                  |
+
+A successful run leaves exactly three files in the output directory:
+
+- `requests.jsonl`: the server's diagnostic records.
+- `summary.json`: the client-side timing summary, described in
+  [Probe summary format](#probe-summary-format).
+- `security-audit.jsonl`: the security audit for the probe's requests.
+
+To compare runs, start with the `aggregates_ms` groups in `summary.json`. The `_warm` groups leave
+out each operation's first sample, which can include one-time work such as the initial schema read.
+
+## Keep diagnostic files private
+
+`requests.jsonl` contains fixed tool names, fixed outcomes, timings, and bounded counters. It does
+not contain credentials, site URLs, tool arguments or their hashes, schema or record data, record
+IDs, rendered output, error text, file paths, or model data. `summary.json` keeps only the subset
+of that data needed to validate and compare probe runs.
+
+`security-audit.jsonl` is an ordinary security audit with the fields `ts`, `caller`, `tool`,
+`input_sha256`, `outcome`, `duration_ms`, and `entity_ids`. The probe records its caller as
+`live-diagnostic` instead of your script name, but the entity IDs still identify records on your
+site. Treat the audit as private.
+
+Keep these files out of version control, and review access permissions before you share a
+diagnostics file or probe output directory.
 
 ## What each duration measures
 
@@ -131,66 +187,6 @@ None of these measure your MCP host or the model. The server cannot observe when
 request or processes a result, or how long the model spends reasoning. Gaps between records include
 that unobserved time, so do not read host or model time from them.
 
-## Run the read-only live probe
-
-The probe measures repeated, comparable timings against your live site. It is a script in this
-repository, not part of the installed command, so it needs a checkout of the repository set up with
-`make setup`, which requires the uv version listed in the
-[development guide](development.md#local-environment). Setup creates `.venv` with the server's
-dependencies and the official SG client. The probe runs the checkout's own code, not your installed
-`sg-mcp-server`.
-
-From the repository root, with `SG_MCP_SITE_URL`, `SG_MCP_SCRIPT_NAME`, and `SG_MCP_API_KEY` set in
-your environment, run:
-
-```sh
-.venv/bin/python scripts/diagnose_live_latency.py \
-    --output-dir /path/to/private/latency-run-001 \
-    --repeats 5
-```
-
-On Windows, use `.venv/Scripts/python.exe` instead of `.venv/bin/python`.
-
-- `--output-dir` must name a new directory whose parent already exists. The probe refuses an
-  existing directory and checks that the new one ends up holding exactly its own files. Choose a
-  location outside the checkout so the output is never committed.
-- `--repeats` sets how many times each operation runs, including the first sample. It accepts `2`
-  through `20` and defaults to `5`.
-
-The probe starts one server process, opens one MCP session, and lists the tools once. For each
-repeat, it runs an `sg_schema` entity listing, an `sg_schema` description of Project, and an
-`sg_query` for one Project. If the first query returns a Project, it then runs one `sg_get` for it.
-It never refreshes the schema explicitly and makes no changes to your site. So that runs are
-comparable regardless of your own settings, the probe's server uses a schema TTL of `3600` seconds,
-a default limit of `50`, and a hard limit of `200`.
-
-The probe exits with `0` on success. On a handled failure, it prints one line starting with
-`live latency diagnostic failed:` to standard error and exits with `1`; invalid command-line
-arguments exit with `2`. A successful run leaves exactly three files in the output directory:
-
-- `requests.jsonl`: the server's diagnostic records.
-- `summary.json`: the validated client-side timing summary, described in
-  [Probe summary format](#probe-summary-format).
-- `security-audit.jsonl`: the security audit for the probe's requests.
-
-To compare runs, start with the `aggregates_ms` groups in `summary.json`. The `_warm` groups leave
-out each operation's first sample, which can include one-time work such as the initial schema read.
-
-## Keep diagnostic files private
-
-`requests.jsonl` contains fixed tool names, fixed outcomes, timings, and bounded counters. It does
-not contain credentials, site URLs, tool arguments or their hashes, schema or record data, record
-IDs, rendered output, error text, file paths, or model data. `summary.json` keeps only the subset
-of that data needed to validate and compare probe runs.
-
-`security-audit.jsonl` is an ordinary security audit with the fields `ts`, `caller`, `tool`,
-`input_sha256`, `outcome`, `duration_ms`, and `entity_ids`. The probe records its caller as
-`live-diagnostic` instead of your script name, but the entity IDs still identify records on your
-site. Treat the audit as private.
-
-Keep these files out of version control, and review access permissions before you share a
-diagnostics file or probe output directory.
-
 ## Diagnostic record format
 
 Each diagnostic line has exactly these fields:
@@ -211,8 +207,10 @@ Each diagnostic line has exactly these fields:
 `outcome` is one of:
 
 - `ok`: the tool completed successfully.
-- `validation_error`: query or schema validation rejected the request.
-- `query_error`: SG or query execution failed.
+- `validation_error`: query or schema validation rejected the request, including a missing argument
+  that the requested operation needs.
+- `query_error`: SG or query execution failed, or `sg_get` found no visible record with the
+  requested ID.
 - `unexpected_error`: an unexpected server error interrupted the request.
 - `invalid_arguments`: the MCP tool arguments failed JSON Schema validation.
 - `unknown_tool`: the requested tool name was not recognized.
@@ -246,21 +244,15 @@ validation excludes cache work.
 | `rendering`            | Conversion of the completed read result into MCP text and structured content.         |
 | `audit_write`          | The security-audit append attempt.                                                    |
 
-The counters have these meanings:
+| Counter                  | Increases when...                                                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `schema_cache.hits`      | A lookup returns an unexpired schema without reading SG. One request can make multiple lookups.                   |
+| `schema_cache.misses`    | A lookup finds no schema or an expired schema and reads SG.                                                       |
+| `schema_cache.refreshes` | A request explicitly refreshes the schema, or an unknown name triggers a refresh. A refresh is not also a miss.   |
+| `provider_call_count`    | A measured `schema_read`, `schema_entity_read`, `find`, or `summarize` call runs. One schema read adds two calls. |
 
-- `schema_cache.hits` increases when a lookup returns an unexpired cached schema without reading it
-  from SG. One request can make more than one lookup.
-- `schema_cache.misses` increases when a lookup finds no schema or an expired schema and reads it
-  from SG.
-- `schema_cache.refreshes` increases for an explicit refresh or a refresh after an unknown name. A
-  refresh does not also count as a miss.
-- `provider_call_count` counts the remote `schema_read`, `schema_entity_read`, `find`, and
-  `summarize` calls measured by `schema_reflection` and `provider_call`. One schema read adds two
-  calls.
-
-`unattributed_ms` includes dispatch, thread scheduling, object construction, diagnostic
-preparation, clock granularity, and other server work outside a named phase. The append to the
-diagnostic file cannot appear in its own record and stays outside `duration_ms`.
+`unattributed_ms` includes other server work, such as dispatch and thread scheduling. The
+diagnostic-file append stays outside `duration_ms`.
 
 ## Probe summary format
 
@@ -281,7 +273,7 @@ diagnostic file cannot appear in its own record and stays outside `duration_ms`.
 | `project_found`      | Boolean indicating whether the first query returned a Project.                             |
 | `get_attempted`      | Boolean equal to `project_found`.                                                          |
 | `get_ok`             | `true` after a successful conditional get, or `null` when no get was attempted.            |
-| `valid`              | `true` only after the complete summary passes validation.                                  |
+| `valid`              | `true`; written only after every response and diagnostic record passes the probe's checks. |
 
 `setup_ms` contains `process_spawn`, `mcp_initialize`, and `tool_listing`. Each value is a
 nonnegative millisecond measurement rounded to six decimal places.

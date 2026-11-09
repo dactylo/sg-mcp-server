@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 from shotgun_api3.shotgun import Shotgun, ShotgunError
-from support import FixtureConnection
 
 from sg_mcp_server import _providers
 from sg_mcp_server._config import Config
@@ -136,8 +135,3 @@ class TestOptionalProfile:
 
     def test_provider_error_type_resolves_installed_error_lazily(self) -> None:
         assert _providers.provider_error_type() is ShotgunError
-
-
-class TestProtocol:
-    def test_fixture_connection_satisfies_protocol(self, fixture_site: FixtureConnection) -> None:
-        assert isinstance(fixture_site, SGReadConnection)

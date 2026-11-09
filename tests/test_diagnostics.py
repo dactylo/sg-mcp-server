@@ -17,11 +17,10 @@ from sg_mcp_server._diagnostics import (
 from sg_mcp_server._engine._errors import ValidationError
 from sg_mcp_server._engine._execution import run_query
 from sg_mcp_server._engine._schema import SchemaCache
-from sg_mcp_server._engine._validation import validate_with_refresh
+from sg_mcp_server._engine._validation import validate_with_schema
 from sg_mcp_server._providers import SGReadConnection, SGRecord
 from sg_mcp_server._tool_contracts import TOOLS
 
-_NOW = datetime.datetime.fromisoformat('2026-07-31T12:00:00+00:00')
 _EXPECTED_RECORD_KEYS = {
     'schema_version',
     'ts',
@@ -34,6 +33,7 @@ _EXPECTED_RECORD_KEYS = {
     'provider_call_count',
     'unattributed_ms',
 }
+_NOW = datetime.datetime.fromisoformat('2026-07-31T12:00:00+00:00')
 
 
 class TestDiagnosticContext:
@@ -301,6 +301,19 @@ class TestDiagnosticSink:
         records = [json.loads(line) for line in path.read_text().splitlines()]
         assert [record['tool'] for record in records] == ['tool_one', 'unknown']
 
+    def test_non_os_write_failure_keeps_the_bare_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        sink = _diagnostic_sink(tmp_path / 'diagnostics.jsonl')
+
+        def failing_writer(record: object) -> None:
+            del record
+            raise RuntimeError('private detail QX7V')
+
+        sink.start('sg_query', 0).finish(failing_writer)
+
+        assert capsys.readouterr().err == 'warning: diagnostic write failed\n'
+
     def test_unwritable_path_warns_once_across_sink_instances(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -313,7 +326,10 @@ class TestDiagnosticSink:
         first.start('sg_query', 0).finish(first)
         second.start('sg_get', 0).finish(second)
 
-        assert capsys.readouterr().err == 'warning: diagnostic write failed\n'
+        err = capsys.readouterr().err
+        assert err.startswith('warning: diagnostic write failed: ')
+        assert err.endswith('\n')
+        assert err.count('\n') == 1
 
 
 class TestObservedViews:
@@ -325,7 +341,7 @@ class TestObservedViews:
         cache = ObservedSchemaCache(SchemaCache(fixture_site, ttl_seconds=900), context)
         connection = ObservedConnection(fixture_site, context)
 
-        query = validate_with_refresh(
+        query, _ = validate_with_schema(
             cache,
             {'entity_type': 'Shot', 'filters': [], 'fields': ['id']},
             default_limit=50,
@@ -399,7 +415,7 @@ class TestObservedViews:
         self, fixture_site: FixtureConnection, tmp_path: Path
     ) -> None:
         cache = SchemaCache(fixture_site, ttl_seconds=900)
-        query = validate_with_refresh(
+        query, _ = validate_with_schema(
             cache,
             {
                 'entity_type': 'Shot',
@@ -463,7 +479,7 @@ class TestObservedViews:
         cache = ObservedSchemaCache(SchemaCache(fixture_site, ttl_seconds=900), context)
 
         with pytest.raises(ValidationError):
-            validate_with_refresh(
+            validate_with_schema(
                 cache,
                 {'entity_type': 'Shot', 'filters': [], 'fields': ['still_missing']},
                 default_limit=50,

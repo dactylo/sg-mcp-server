@@ -5,11 +5,23 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, cast
 
-from sg_mcp_server import _engine, _rendering, _schema_adapter
+from sg_mcp_server import _engine, _schema_adapter
 from sg_mcp_server._diagnostics import DiagnosticContext, ObservedSchemaCache
 from sg_mcp_server._errors import bare_condition_hint
 from sg_mcp_server._surface import ToolBodyResult, ToolRuntime, ToolSurface, base_argument_error
 from sg_mcp_server._tool_contracts import TOOLS
+
+_CONDITION_SHAPES_HINT = (
+    '; each filter condition must be [field, operator, value] with operator one of contains, '
+    'ends_with, greater_than, is, is_not, less_than, name_contains, name_ends_with, '
+    'name_not_contains, name_starts_with, not_contains, starts_with, type_is or type_is_not; '
+    '[field, "in" or "not_in", [values]]; [field, "between" or "not_between", low, high]; '
+    '[field, relative, count, unit] with relative one of "in_last", "in_next", "not_in_last" '
+    'or "not_in_next" and unit one of HOUR, DAY, WEEK, MONTH or YEAR, or the same as '
+    '{"field", "op", "count", "unit"}; [field, calendar, offset] with calendar one of '
+    '"in_calendar_day", "in_calendar_week", "in_calendar_month" or "in_calendar_year"; '
+    'or a group {"filter_operator": "all" or "any", "filters": [...]}'
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -49,10 +61,18 @@ class _QueryArguments:
         object.__setattr__(self, 'limit', int(self.limit))
 
 
+def _condition_shapes_hint(error: jsonschema.ValidationError) -> str | None:
+    """Describe accepted filter shapes for a rejected condition or group."""
+    path = error.absolute_path
+    if len(path) > 1 and path[0] == 'filters':
+        return _CONDITION_SHAPES_HINT
+    return None
+
+
 def _handle_schema(
     runtime: ToolRuntime, payload: dict[str, Any], context: DiagnosticContext
 ) -> types.CallToolResult:
-    """Explore the live site schema (client-facing text lives in TOOLS)."""
+    """Explore the live site schema (client-facing text lives in `TOOLS`)."""
     arguments = _schema_adapter.SchemaArguments(**payload)
     complete_payload = dataclasses.asdict(arguments)
     cache = ObservedSchemaCache(runtime.schema_cache, context)
@@ -67,7 +87,7 @@ def _run_get(
     runtime: ToolRuntime,
     arguments: _GetArguments,
     context: DiagnosticContext,
-) -> _rendering.RenderResult:
+) -> ToolBodyResult:
     """Validate, execute, and render an `sg_get` request."""
     request: dict[str, object] = {
         'entity_type': arguments.entity_type,
@@ -88,7 +108,7 @@ def _handle_get(
     return runtime.audited(
         complete_payload,
         context,
-        lambda: cast('ToolBodyResult', _run_get(runtime, arguments, context)),
+        lambda: _run_get(runtime, arguments, context),
     )
 
 
@@ -96,7 +116,7 @@ def _run_query(
     runtime: ToolRuntime,
     arguments: _QueryArguments,
     context: DiagnosticContext,
-) -> _rendering.RenderResult:
+) -> ToolBodyResult:
     """Validate, execute, and render an `sg_query` request."""
     request: dict[str, object] = {
         'entity_type': arguments.entity_type,
@@ -124,7 +144,7 @@ def _handle_query(
     return runtime.audited(
         complete_payload,
         context,
-        lambda: cast('ToolBodyResult', _run_query(runtime, arguments, context)),
+        lambda: _run_query(runtime, arguments, context),
     )
 
 
@@ -156,6 +176,10 @@ def _argument_error(
         hint = bare_condition_hint(arguments)
         if hint is not None:
             message += hint
+        elif summary_error is None:
+            condition_hint = _condition_shapes_hint(error)
+            if condition_hint is not None:
+                message += condition_hint
     return message
 
 

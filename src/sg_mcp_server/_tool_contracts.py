@@ -1,10 +1,10 @@
 """Define the exact contract of the served tools."""
 
-from typing import Any, Final
+from typing import Final
 
 from mcp import types
 
-_FILTER_SCHEMA_BASE_CONDITIONS: Final[tuple[dict[str, Any], ...]] = (
+_FILTER_SCHEMA_BASE_CONDITIONS: Final[tuple[dict[str, object], ...]] = (
     {
         'type': 'array',
         'prefixItems': [
@@ -107,7 +107,7 @@ _FILTER_SCHEMA_BASE_CONDITIONS: Final[tuple[dict[str, Any], ...]] = (
         'additionalProperties': False,
     },
 )
-_FILTER_SCHEMA_INNER_GROUP: Final[dict[str, Any]] = {
+_FILTER_SCHEMA_INNER_GROUP: Final[dict[str, object]] = {
     'type': 'object',
     'properties': {
         'filter_operator': {'type': 'string', 'enum': ['all', 'any']},
@@ -120,7 +120,7 @@ _FILTER_SCHEMA_INNER_GROUP: Final[dict[str, Any]] = {
     'additionalProperties': False,
 }
 _FILTER_SCHEMA_MAX_GROUP_DEPTH: Final = 2
-_FILTER_SCHEMA_OUTER_GROUP: Final[dict[str, Any]] = {
+_FILTER_SCHEMA_OUTER_GROUP: Final[dict[str, object]] = {
     'type': 'object',
     'properties': {
         'filter_operator': {'type': 'string', 'enum': ['all', 'any']},
@@ -137,18 +137,18 @@ _FILTER_SCHEMA_OUTER_GROUP: Final[dict[str, Any]] = {
     'required': ['filter_operator', 'filters'],
     'additionalProperties': False,
 }
-_FILTER_SCHEMA_ROOT_ITEMS: Final[dict[str, Any]] = {
+_FILTER_SCHEMA_ROOT_ITEMS: Final[dict[str, object]] = {
     'oneOf': [
         *_FILTER_SCHEMA_BASE_CONDITIONS,
         _FILTER_SCHEMA_OUTER_GROUP,
     ]
 }
-FILTERS_SCHEMA: Final[dict[str, Any]] = {
+FILTERS_SCHEMA: Final[dict[str, object]] = {
     'type': 'array',
     'items': _FILTER_SCHEMA_ROOT_ITEMS,
 }
 
-GROUPING_SCHEMA: Final[dict[str, Any]] = {
+GROUPING_SCHEMA: Final[dict[str, object]] = {
     'type': 'array',
     'description': 'Group records by field; type defaults to "exact" when omitted.',
     'items': {
@@ -162,7 +162,7 @@ GROUPING_SCHEMA: Final[dict[str, Any]] = {
         'additionalProperties': False,
     },
 }
-ORDER_SCHEMA: Final[dict[str, Any]] = {
+ORDER_SCHEMA: Final[dict[str, object]] = {
     'type': 'array',
     'items': {
         'type': 'object',
@@ -174,7 +174,7 @@ ORDER_SCHEMA: Final[dict[str, Any]] = {
         'additionalProperties': False,
     },
 }
-SUMMARY_FIELDS_SCHEMA: Final[dict[str, Any]] = {
+SUMMARY_FIELDS_SCHEMA: Final[dict[str, object]] = {
     'type': 'array',
     'minItems': 1,
     'maxItems': 1,
@@ -208,8 +208,10 @@ TOOLS: Final[tuple[types.Tool, ...]] = (
             '(site-level, not per-project). '
             "op: 'entities' lists types with display names; 'describe' lists "
             "one entity's fields compactly; 'search' matches field names or labels by "
-            'case-insensitive substring (top 40). Pages of 100 via offset; '
-            'refresh=true re-reflects. Selection value and entity-type lists may be capped; '
+            'case-insensitive substring. offset pages entities and describe by 100 '
+            'and search by 40; '
+            'a note gives the next offset. refresh=true re-reflects. '
+            'Selection value and entity-type lists may be capped; '
             'a <name>_omitted count reports how many entries are not shown.'
         ),
         input_schema={

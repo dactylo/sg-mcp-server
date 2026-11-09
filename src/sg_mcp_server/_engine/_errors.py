@@ -1,5 +1,10 @@
 """Engine exceptions and the bounded-alternatives error contract."""
 
+import contextlib
+from collections.abc import Generator, Mapping
+
+from sg_mcp_server._providers import provider_error_type, provider_transport_error_types
+
 ENUMERATION_CAP = 40
 
 
@@ -34,7 +39,7 @@ class ValidationError(EngineError):
     def __init__(
         self,
         message: str,
-        alternatives: dict[str, list[str]] | None = None,
+        alternatives: Mapping[str, list[str]] | None = None,
         unknown_name: bool = False,
     ) -> None:
         """Store a validation failure and detached, bounded alternatives.
@@ -70,16 +75,33 @@ def _capped(values: list[str]) -> list[str]:
     return values[:ENUMERATION_CAP]
 
 
-def transport_query_error(error: Exception) -> QueryError:
-    """Describe a site transport failure as a query error.
-
-    Args:
-        error: Transport exception raised by a provider call.
-
-    Returns:
-        A query error naming the exception class and detail, or `no details`
-        when the exception message is empty. The caller preserves its cause.
-    """
+def _transport_query_error(error: Exception) -> QueryError:
+    """Name a transport failure's class and detail in a query error."""
     return QueryError(
         f'the SG site request failed ({type(error).__name__}: {str(error) or "no details"})'
     )
+
+
+@contextlib.contextmanager
+def provider_errors_as_query_errors() -> Generator[None, None, None]:
+    """Translate provider failures raised in the block into query errors.
+
+    A backend error keeps its message. A supported transport error is described
+    by its exception class and detail, or `no details` when its message is
+    empty.
+
+    Yields:
+        Control to the block that calls the provider.
+
+    Raises:
+        QueryError: If the block raises the provider's backend error or a
+            supported transport error; the original exception is the cause.
+    """
+    shotgun_error = provider_error_type()
+    transport_errors = provider_transport_error_types()
+    try:
+        yield
+    except shotgun_error as error:
+        raise QueryError(str(error)) from error
+    except transport_errors as error:
+        raise _transport_query_error(error) from error

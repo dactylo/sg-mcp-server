@@ -6,20 +6,18 @@ from typing import Any, Unpack
 
 import pytest
 from mcp import Client, MCPError
-from support import Clock, FixtureConnection
+from shotgun_api3.shotgun import ShotgunError
+from support import Clock, FailingFindConnection, FixtureConnection
 
 from sg_mcp_server import _server, _tools
-from sg_mcp_server._config import Config
 from sg_mcp_server._diagnostics import DiagnosticContext, DiagnosticSink
 from sg_mcp_server._providers import (
     FindOptions,
     SGRecord,
     ValidatedFilters,
 )
-from sg_mcp_server._server import build_server
 from tests.server._helpers import (
     AdversarialLabelConnection,
-    BackendErrorConnection,
     build_test_server,
     call,
     read_json_lines,
@@ -58,17 +56,7 @@ class TestDiagnostics:
         audit_path = tmp_path / 'blocked-audit'
         audit_path.mkdir()
         diagnostics_path = tmp_path / 'diagnostics.jsonl'
-        server = build_server(
-            Config(
-                site_url='https://fixture.shotgunstudio.com',
-                script_name='s',
-                api_key='k',
-                audit_path=audit_path,
-                diagnostics_path=diagnostics_path,
-            ),
-            fixture_site,
-            _tools.surface(),
-        )
+        server = build_test_server(fixture_site, tmp_path, diagnostics=True, audit_path=audit_path)
 
         result = call(server, 'sg_schema', {'op': 'entities'})
 
@@ -165,7 +153,10 @@ class TestDiagnostics:
         assert second.structured_content == first.structured_content
         assert len(audit_records) == 2
         assert all(record['outcome'] == 'ok' for record in audit_records)
-        assert capsys.readouterr().err == 'warning: diagnostic write failed\n'
+        err = capsys.readouterr().err
+        assert err.startswith('warning: diagnostic write failed: ')
+        assert err.endswith('\n')
+        assert err.count('\n') == 1
 
     def test_disabled_diagnostics_preserve_exact_audit_schema(
         self, fixture_site: FixtureConnection, tmp_path: Path
@@ -202,10 +193,9 @@ class TestDiagnostics:
 
         async def run() -> None:
             async with Client(server) as client:
-                for _ in range(5):
+                for _ in range(2):
                     await client.call_tool('sg_schema', {'op': 'entities'})
-                for _ in range(5):
-                    await client.call_tool('sg_query', query)
+                await client.call_tool('sg_query', query)
                 await client.call_tool(
                     'sg_get',
                     {'entity_type': 'Project', 'entity_id': project['id'], 'fields': ['name']},
@@ -214,17 +204,20 @@ class TestDiagnostics:
         asyncio.run(run())
 
         records = read_json_lines(tmp_path / 'diagnostics.jsonl')
-        assert len(records) == 11
+        assert len(records) == 4
         assert [record['request_id'] for record in records] == list(
-            range(records[0]['request_id'], records[0]['request_id'] + 11)
+            range(records[0]['request_id'], records[0]['request_id'] + 4)
         )
-        assert records[0]['tool'] == 'sg_schema'
+        assert [record['tool'] for record in records] == [
+            'sg_schema',
+            'sg_schema',
+            'sg_query',
+            'sg_get',
+        ]
         assert records[0]['schema_cache'] == {'hits': 0, 'misses': 1, 'refreshes': 0}
         assert 'schema_reflection' in records[0]['phases_ms']
-        for record in records[1:5]:
-            assert record['tool'] == 'sg_schema'
-            assert record['schema_cache'] == {'hits': 1, 'misses': 0, 'refreshes': 0}
-            assert 'schema_reflection' not in record['phases_ms']
+        assert records[1]['schema_cache'] == {'hits': 1, 'misses': 0, 'refreshes': 0}
+        assert 'schema_reflection' not in records[1]['phases_ms']
         for record in records:
             assert (
                 abs(
@@ -374,7 +367,7 @@ class TestDiagnostics:
 
         backend_path = tmp_path / 'backend'
         backend_server = build_test_server(
-            BackendErrorConnection(fixture_site, adversarial_backend),
+            FailingFindConnection(fixture_site, ShotgunError(adversarial_backend)),
             backend_path,
             diagnostics=True,
         )

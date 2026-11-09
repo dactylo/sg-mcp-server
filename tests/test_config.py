@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+import textwrap
 import traceback
 import zoneinfo
 from pathlib import Path
@@ -6,14 +10,15 @@ import pytest
 
 from sg_mcp_server import _config
 from sg_mcp_server._config import Config, ConfigError
+from tests.cli_helpers import CHILD_TIMEOUT_SECONDS, PROCESS_GROUP_FLAGS, process_transcript
 
-_AUDIT_PATH = Path('/').joinpath('tmp', 'audit.jsonl')
-_DIAGNOSTICS_PATH = Path('/').joinpath('tmp', 'diag.jsonl')
+_AUDIT_PATH = Path.home() / 'audit.jsonl'
 _BASE_ENV: dict[str, str] = {
     'SG_MCP_SITE_URL': 'https://example.shotgunstudio.com',
     'SG_MCP_SCRIPT_NAME': 'sg-mcp-server',
     'SG_MCP_API_KEY': 'secret',
 }
+_DIAGNOSTICS_PATH = Path.home() / 'diag.jsonl'
 
 
 class TestFromEnv:
@@ -219,5 +224,74 @@ def test_empty_diagnostics_path_disables_diagnostics(value: str) -> None:
 
 
 def test_nonempty_diagnostics_path_is_stripped() -> None:
-    config = Config.from_env(_BASE_ENV | {'SG_MCP_DIAGNOSTICS_PATH': ' /tmp/diag.jsonl '})
+    config = Config.from_env(_BASE_ENV | {'SG_MCP_DIAGNOSTICS_PATH': f' {_DIAGNOSTICS_PATH} '})
     assert config.diagnostics_path == _DIAGNOSTICS_PATH
+
+
+@pytest.mark.parametrize('name', ['SG_MCP_AUDIT_PATH', 'SG_MCP_DIAGNOSTICS_PATH'])
+def test_relative_path_setting_is_rejected(name: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        Config.from_env(_BASE_ENV | {name: 'logs/file.jsonl'})
+    assert (
+        str(caught.value) == f"the {name} setting must be an absolute path, got 'logs/file.jsonl'"
+    )
+
+
+@pytest.mark.parametrize('name', ['SG_MCP_AUDIT_PATH', 'SG_MCP_DIAGNOSTICS_PATH'])
+def test_home_relative_path_setting_is_expanded(name: str) -> None:
+    config = Config.from_env(_BASE_ENV | {name: '~/sg/file.jsonl'})
+    expected = Path.home() / 'sg' / 'file.jsonl'
+    assert (
+        config.audit_path if name == 'SG_MCP_AUDIT_PATH' else config.diagnostics_path
+    ) == expected
+
+
+def test_unexpandable_home_path_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_home(_self: Path) -> Path:
+        raise RuntimeError('Could not determine home directory.')
+
+    monkeypatch.setattr(_config.Path, 'expanduser', no_home)
+    with pytest.raises(ConfigError, match='SG_MCP_AUDIT_PATH setting must be an absolute path'):
+        Config.from_env(_BASE_ENV | {'SG_MCP_AUDIT_PATH': '~/audit.jsonl'})
+
+
+def test_unset_audit_path_without_home_names_the_setting() -> None:
+    script = textwrap.dedent("""\
+        from pathlib import Path
+
+        def no_home(_cls):
+            raise RuntimeError('Could not determine home directory.')
+
+        Path.home = classmethod(no_home)
+
+        from sg_mcp_server import _cli
+        from sg_mcp_server._config import Config, ConfigError
+
+        try:
+            Config.from_env({
+                'SG_MCP_SITE_URL': 'https://example.shotgunstudio.com',
+                'SG_MCP_SCRIPT_NAME': 'sg-mcp-server',
+                'SG_MCP_API_KEY': 'secret',
+            })
+        except ConfigError as error:
+            print(error)
+        else:
+            raise AssertionError('missing home must fail')
+        """)
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        env={**os.environ, 'PYTHON_COLORS': '0'},
+        timeout=CHILD_TIMEOUT_SECONDS,
+        start_new_session=True,
+        creationflags=PROCESS_GROUP_FLAGS,
+        check=False,
+    )
+    assert result.returncode == 0, process_transcript(result)
+    assert result.stdout.strip() == (
+        'the SG_MCP_AUDIT_PATH setting is required because the home directory cannot be determined'
+    )
+    assert result.stderr == '', process_transcript(result)

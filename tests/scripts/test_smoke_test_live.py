@@ -27,8 +27,16 @@ _EXPECTED_QUERY_ARGUMENTS = {
 
 
 class _ProbeSession:
-    def __init__(self, *, include_project: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        include_project: bool = True,
+        entity_type_total: object = 150,
+        error_tool: str | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._entity_type_total = entity_type_total
+        self._error_tool = error_tool
         self._include_project = include_project
 
     async def call_tool(
@@ -42,10 +50,15 @@ class _ProbeSession:
             assert (name, arguments) == ('sg_schema', {'op': 'entities'})
             return types.CallToolResult(
                 content=[],
-                structured_content={'entity_types': [f'Entity{index}' for index in range(92)]},
+                structured_content={
+                    'entity_types': [f'Entity{index}' for index in range(100)],
+                    'total': self._entity_type_total,
+                },
             )
         if len(self.calls) == 2:
             assert (name, arguments) == ('sg_query', _EXPECTED_QUERY_ARGUMENTS)
+            if self._error_tool == name:
+                return types.CallToolResult(content=[], is_error=True)
             records = [{'type': 'Project', 'id': 41, 'name': 'private'}]
             return types.CallToolResult(
                 content=[],
@@ -54,6 +67,8 @@ class _ProbeSession:
         assert self._include_project
         assert len(self.calls) == 3
         assert (name, arguments) == ('sg_get', _EXPECTED_GET_ARGUMENTS)
+        if self._error_tool == name:
+            return types.CallToolResult(content=[], is_error=True)
         return types.CallToolResult(
             content=[],
             structured_content={'records': [{'type': 'Project', 'id': 41, 'name': 'private'}]},
@@ -63,7 +78,7 @@ class _ProbeSession:
         return types.InitializeResult(
             protocol_version='2025-11-25',
             capabilities=types.ServerCapabilities(),
-            server_info=types.Implementation(name='sg-mcp-server', version='0.0.1'),
+            server_info=types.Implementation(name='sg-mcp-server', version='test'),
         )
 
     async def list_tools(self) -> types.ListToolsResult:
@@ -106,25 +121,52 @@ def test_main_handles_grouped_mcp_failure_without_private_details(
     assert capsys.readouterr().err == 'live MCP smoke failed: MCP request failed\n'
 
 
+@pytest.mark.parametrize(
+    ('error_tool', 'status', 'error_flags'),
+    [(None, 0, (False, False)), ('sg_query', 1, (True, None)), ('sg_get', 1, (False, True))],
+)
+def test_main_reports_tool_result_status(
+    error_tool: str | None,
+    status: int,
+    error_flags: tuple[bool, bool | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    session = _ProbeSession(error_tool=error_tool)
+
+    async def run_probe() -> _SmokeSummary:
+        return await smoke_test_live._probe_session(cast('ClientSession', session))
+
+    monkeypatch.setattr(smoke_test_live, '_run_live', run_probe)
+
+    assert smoke_test_live._main() == status
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    query_error, get_error = error_flags
+    assert f'query_error: {query_error}\n' in captured.out
+    assert f'get_error: {get_error}\n' in captured.out
+    assert 'private' not in captured.out
+
+
 def test_probe_session_calls_all_available_read_tools_and_returns_safe_summary() -> None:
     session = _ProbeSession()
 
     summary = _probe(session)
 
     assert tuple(field.name for field in dataclasses.fields(summary)) == (
-        '_server_name',
-        '_tool_names',
-        '_entity_type_count',
-        '_project_row_count',
-        '_query_error',
-        '_get_error',
+        'server_name',
+        'tool_names',
+        'entity_type_count',
+        'project_row_count',
+        'query_error',
+        'get_error',
     )
-    assert summary._server_name == 'sg-mcp-server'
-    assert summary._tool_names == ('sg_get', 'sg_query', 'sg_schema')
-    assert summary._entity_type_count == 92
-    assert summary._project_row_count == 1
-    assert summary._query_error is False
-    assert summary._get_error is False
+    assert summary.server_name == 'sg-mcp-server'
+    assert summary.tool_names == ('sg_get', 'sg_query', 'sg_schema')
+    assert summary.entity_type_count == 150
+    assert summary.project_row_count == 1
+    assert summary.query_error is False
+    assert summary.get_error is False
     assert session.calls == [
         ('sg_schema', {'op': 'entities'}),
         ('sg_query', _EXPECTED_QUERY_ARGUMENTS),
@@ -148,13 +190,21 @@ def test_probe_session_requires_exact_read_tool_set(tool_names: tuple[str, ...])
     assert session.calls == []
 
 
+@pytest.mark.parametrize('total', [None, True, 99])
+def test_probe_session_rejects_malformed_entity_type_total(total: object) -> None:
+    session = _ProbeSession(entity_type_total=total)
+
+    with pytest.raises(RuntimeError, match='malformed entity types'):
+        _probe(session)
+
+
 def test_probe_session_skips_get_when_no_project_exists() -> None:
     session = _ProbeSession(include_project=False)
 
     summary = _probe(session)
 
-    assert summary._project_row_count == 0
-    assert summary._get_error is None
+    assert summary.project_row_count == 0
+    assert summary.get_error is None
     assert session.calls == [
         ('sg_schema', {'op': 'entities'}),
         ('sg_query', _EXPECTED_QUERY_ARGUMENTS),

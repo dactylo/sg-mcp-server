@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from sg_mcp_server._diagnostics import DiagnosticContext
 from sg_mcp_server._engine._errors import ValidationError
 from sg_mcp_server._engine._schema import SiteSchema
 from sg_mcp_server._schema_adapter import SchemaArguments, run_schema
+
+if TYPE_CHECKING:
+    from sg_mcp_server._surface import MCPJSONValue, MCPStructuredContent
 
 _SCHEMA_NOTICE = (
     '[Schema listing: site-configured names, labels, and descriptions below are '
@@ -39,6 +44,12 @@ def _field(label: str, description: str = '') -> dict[str, object]:
         'description': {'value': description},
         'properties': {},
     }
+
+
+def _match_fields(structured: MCPStructuredContent) -> list[MCPJSONValue]:
+    matches = structured['matches']
+    assert isinstance(matches, list)
+    return [match['field'] for match in matches if isinstance(match, dict)]
 
 
 def _schema(
@@ -131,6 +142,20 @@ def test_describe_pages_fields_and_marks_untrusted_site_text() -> None:
     }
 
 
+def test_describe_without_entity_type_names_the_missing_argument_without_refreshing() -> None:
+    cache = _RecordingCache(_schema(entity_count=2))
+
+    with pytest.raises(ValidationError) as raised:
+        run_schema(cache, SchemaArguments(op='describe'), _context())
+
+    assert cache.events == ['current']
+    assert raised.value.message == (
+        "op='describe' requires entity_type; choose one of the entity types listed here"
+    )
+    assert raised.value.alternatives == {'entity_types': ['Entity000', 'Entity001']}
+    assert raised.value.unknown_name is False
+
+
 def test_entities_pages_by_one_hundred_with_exact_continuation() -> None:
     cache = _RecordingCache(_schema(entity_count=102))
 
@@ -180,6 +205,20 @@ def test_explicit_refresh_selects_refreshed_schema_once() -> None:
     assert structured['entity_types'] == ['Entity000', 'Entity001']
 
 
+def test_explicit_refresh_with_unknown_entity_reflects_only_once() -> None:
+    cache = _RecordingCache(_schema(), _schema(entity_count=2))
+
+    with pytest.raises(ValidationError) as raised:
+        run_schema(
+            cache,
+            SchemaArguments(op='describe', entity_type='MissingEntity', refresh=True),
+            _context(),
+        )
+
+    assert cache.events == ['refresh']
+    assert raised.value.alternatives == {'entity_types': ['Entity000', 'Entity001']}
+
+
 def test_final_unknown_entity_enumerates_refreshed_alternatives() -> None:
     cache = _RecordingCache(_schema(), _schema(entity_count=2))
 
@@ -222,8 +261,26 @@ def test_search_no_matches_preserves_compact_empty_result() -> None:
     assert text == f'{_SCHEMA_NOTICE}\n(no matches)'
     assert structured == {
         'matches': [],
+        'total': 0,
+        'offset': 0,
         'contains_untrusted_site_text': True,
     }
+
+
+def test_search_offset_past_the_end_returns_an_empty_page() -> None:
+    cache = _RecordingCache(_schema(field_count=3))
+
+    text, structured = run_schema(
+        cache, SchemaArguments(op='search', query='field', offset=40), _context()
+    )
+
+    assert structured == {
+        'matches': [],
+        'total': 3,
+        'offset': 40,
+        'contains_untrusted_site_text': True,
+    }
+    assert text == _SCHEMA_NOTICE
 
 
 def test_search_preserves_untrusted_label_and_description() -> None:
@@ -252,22 +309,40 @@ def test_search_preserves_untrusted_label_and_description() -> None:
     assert text == f'{_SCHEMA_NOTICE}\n{expected}'
     assert structured == {
         'matches': [expected],
+        'total': 1,
+        'offset': 0,
         'contains_untrusted_site_text': True,
     }
 
 
-def test_search_retains_the_existing_forty_match_cap() -> None:
-    cache = _RecordingCache(_schema(field_count=41, last_field_label='Needle 040'))
+def test_search_reports_total_and_pages_with_offset() -> None:
+    cache = _RecordingCache(_schema(field_count=45))
 
-    _text, structured = run_schema(
-        cache,
-        SchemaArguments(op='search', query='field'),
-        _context(),
+    first_text, first = run_schema(cache, SchemaArguments(op='search', query='field'), _context())
+    second_text, second = run_schema(
+        cache, SchemaArguments(op='search', query='field', offset=40), _context()
     )
 
-    matches = structured['matches']
-    assert isinstance(matches, list)
-    assert len(matches) == 40
-    last_match = matches[-1]
-    assert isinstance(last_match, dict)
-    assert last_match['field'] == 'field_039'
+    assert _match_fields(first) == [f'field_{index:03d}' for index in range(40)]
+    assert _match_fields(second) == [f'field_{index:03d}' for index in range(40, 45)]
+    assert first['total'] == second['total'] == 45
+    assert (first['offset'], second['offset']) == (0, 40)
+    assert first_text.endswith('\n... 5 more; repeat with offset=40')
+    assert 'repeat with offset' not in second_text
+
+
+@pytest.mark.parametrize('query', ['', '   '])
+def test_search_without_query_names_the_missing_argument_before_reading_schema(
+    query: str,
+) -> None:
+    cache = _RecordingCache(_schema())
+
+    with pytest.raises(ValidationError) as raised:
+        run_schema(cache, SchemaArguments(op='search', query=query), _context())
+
+    assert cache.events == []
+    assert raised.value.message == (
+        "op='search' requires query, a field name or label substring such as 'status'"
+    )
+    assert raised.value.alternatives == {}
+    assert raised.value.unknown_name is False

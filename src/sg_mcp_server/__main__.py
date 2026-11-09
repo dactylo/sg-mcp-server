@@ -1,4 +1,4 @@
-"""Serve the read-only solo-mode MCP tools over stdio.
+"""Serve the read-only MCP tools over stdio.
 
 Run `python -m sg_mcp_server` with `SG_MCP_SITE_URL`, `SG_MCP_SCRIPT_NAME`, and
 `SG_MCP_API_KEY` set. The command uses the same optional environment settings

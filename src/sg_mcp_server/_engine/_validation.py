@@ -1,7 +1,5 @@
 """Validate native SG read queries against reflected site schema."""
 
-# pyright: reportPrivateUsage=false
-
 import dataclasses
 import datetime
 from collections.abc import Mapping
@@ -11,7 +9,7 @@ from sg_mcp_server._engine import _errors as errors
 from sg_mcp_server._engine import _relative_dates as relative_dates
 from sg_mcp_server._engine import _schema as schema
 from sg_mcp_server._errors import bare_condition_hint
-from sg_mcp_server._providers import SGValue, SummaryRequest, ValidatedFilters
+from sg_mcp_server._providers import SG_SCALAR_TYPES, SGValue, SummaryRequest, ValidatedFilters
 
 _BETWEEN_OPERATORS: frozenset[str] = frozenset({'between', 'not_between'})
 _BETWEEN_VALUE_COUNT = 2
@@ -97,14 +95,9 @@ _QUERY_KEYS: frozenset[str] = frozenset(
 _SPAN_CONDITION_LENGTH = 4
 _SUMMARIZE_KEYS: frozenset[str] = frozenset({'grouping', 'summary_fields'})
 _SUMMARY_FIELD_KEYS: frozenset[str] = frozenset({'field', 'type'})
-_SUMMARY_TYPES: dict[str, str] = {
-    'average': 'avg',
-    'count': 'count',
-    'maximum': 'max',
-    'minimum': 'min',
-    'record_count': 'count',
-    'sum': 'sum',
-}
+_SUMMARY_TYPES: frozenset[str] = frozenset(
+    {'average', 'count', 'maximum', 'minimum', 'record_count', 'sum'}
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,8 +145,8 @@ class _StructuralQuery(TypedDict):
 class _ValidationContext:
     """Carry schema and timezone through one validation walk."""
 
-    _site_schema: schema.SiteSchema
-    _zone: datetime.tzinfo
+    site_schema: schema.SiteSchema
+    zone: datetime.tzinfo
 
 
 def _as_array(value: object, message: str) -> list[object]:
@@ -556,7 +549,7 @@ def _validated_selection(
     field: str,
     value: object,
 ) -> str:
-    """Check a value against a list or status_list field's native values."""
+    """Check a value against a `list` or `status_list` field's native values."""
     valid_values = site_schema.valid_values(entity_type, field) or []
     alternatives = {'status_values': valid_values}
     if not isinstance(value, str):
@@ -575,10 +568,7 @@ def _validated_selection(
 
 def _validated_sg_value(value: object) -> SGValue:
     """Return one supported recursive SG value or reject it."""
-    if value is None or isinstance(
-        value,
-        (bool, int, float, str, datetime.date, datetime.datetime),
-    ):
+    if value is None or isinstance(value, SG_SCALAR_TYPES):
         return value
     if isinstance(value, list):
         return [_validated_sg_value(item) for item in cast('list[object]', value)]
@@ -719,11 +709,11 @@ def _coerce_scalar_value(
     if value is None:
         return None
     if data_type in {'list', 'status_list'}:
-        return _validated_selection(context._site_schema, entity_type, field, value)
+        return _validated_selection(context.site_schema, entity_type, field, value)
     if data_type == 'date':
         return _validated_date(entity_type, field, value)
     if data_type == 'date_time':
-        return _validated_datetime(entity_type, field, value, context._zone)
+        return _validated_datetime(entity_type, field, value, context.zone)
     return _validated_simple(entity_type, field, data_type, value)
 
 
@@ -736,7 +726,7 @@ def _coerce(
 ) -> SGValue:
     """Validate one condition value according to its field's data type."""
     if data_type in {'entity', 'multi_entity'}:
-        return _coerce_entity_value(context._site_schema, entity_type, field, value)
+        return _coerce_entity_value(context.site_schema, entity_type, field, value)
     return _coerce_scalar_value(context, entity_type, field, data_type, value)
 
 
@@ -784,7 +774,7 @@ def _value_condition(
             field,
             operator,
             _validated_entity_value(
-                context._site_schema,
+                context.site_schema,
                 (owner_entity, owner_field),
                 operator,
                 value,
@@ -874,8 +864,8 @@ def _grounded_filters(
             continue
         items = _as_array(condition, 'each filter condition must be a list')
         field, operator = str(items[0]), str(items[1])
-        data_type = _resolve_field(context._site_schema, entity_type, field)
-        owner_entity, owner_field = context._site_schema.resolve_terminal(entity_type, field)
+        data_type = _resolve_field(context.site_schema, entity_type, field)
+        owner_entity, owner_field = context.site_schema.resolve_terminal(entity_type, field)
         _check_operator(owner_entity, owner_field, data_type, operator)
         grounded.append(
             _rewritten_condition(
@@ -997,7 +987,8 @@ def validate_query(
     Args:
         site_schema: Reflected schema to ground against.
         payload: Raw `sg_query` tool input (native SG grammar).
-        default_limit: Rows returned when the payload names no limit.
+        default_limit: Rows returned when the payload omits its limit or uses
+            zero.
         hard_limit: Absolute row cap; larger requests clamp to it.
         now: Aware configured-zone timestamp anchoring relative dates.
 
@@ -1007,14 +998,15 @@ def validate_query(
         `{summary_fields, grouping}` shape.
 
     Raises:
-        ValidationError: On a naive clock or any shape, name, operator, or
-            value failure, with enumerated alternatives.
+        ValidationError: On a naive clock or a shape, name, operator, or value
+            failure. Legal alternatives are included where available.
+        SchemaError: If malformed reflected metadata prevents validation.
     """
     zone = now.tzinfo
     if zone is None or now.utcoffset() is None:
         raise errors.ValidationError('query clock must be timezone-aware')
     structural = _structural_validate(payload)
-    entity_type: str = structural['entity_type']
+    entity_type = structural['entity_type']
     if not site_schema.has_entity(entity_type):
         _raise_unknown_entity(site_schema, entity_type)
     for field in structural['fields']:
@@ -1055,7 +1047,8 @@ def validate_with_schema(
     Args:
         cache: The schema cache; `refresh()` is called at most once.
         payload: Raw `sg_query` tool input.
-        default_limit: Rows returned when the payload names no limit.
+        default_limit: Rows returned when the payload omits its limit or uses
+            zero.
         hard_limit: Absolute row cap.
         now: Aware configured-zone timestamp anchoring relative dates.
 
@@ -1066,6 +1059,7 @@ def validate_with_schema(
     Raises:
         ValidationError: When validation fails against the fresh schema too
             (or immediately, for non-name failures).
+        SchemaError: When malformed reflected metadata prevents validation.
         QueryError: When schema reflection fails.
     """
     site_schema = cache.current()
@@ -1077,30 +1071,3 @@ def validate_with_schema(
         site_schema = cache.refresh()
         query = validate_query(site_schema, payload, default_limit, hard_limit, now)
     return query, site_schema
-
-
-def validate_with_refresh(
-    cache: schema.SchemaSource,
-    payload: Mapping[str, object],
-    default_limit: int,
-    hard_limit: int,
-    now: datetime.datetime,
-) -> ValidatedQuery:
-    """Validate, refreshing the schema cache once on an unknown name.
-
-    Args:
-        cache: The schema cache; `refresh()` is called at most once.
-        payload: Raw `sg_query` tool input.
-        default_limit: Rows returned when the payload names no limit.
-        hard_limit: Absolute row cap.
-        now: Aware configured-zone timestamp anchoring relative dates.
-
-    Returns:
-        The validated query.
-
-    Raises:
-        ValidationError: When validation fails against the fresh schema too
-            (or immediately, for non-name failures).
-        QueryError: When schema reflection fails.
-    """
-    return validate_with_schema(cache, payload, default_limit, hard_limit, now)[0]

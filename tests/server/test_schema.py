@@ -10,7 +10,7 @@ from sg_mcp_server._providers import (
 )
 from tests.server._helpers import assert_error_is_fenced, build_test_server, call, text_of
 
-FRESH_ENTITY = 'FreshEntity'
+_FRESH_ENTITY = 'FreshEntity'
 
 
 class TestSchemaSearch:
@@ -25,7 +25,7 @@ class TestSchemaSearch:
         result = call(
             server,
             'sg_schema',
-            {'op': 'search', 'entity_type': FRESH_ENTITY, 'query': 'match_'},
+            {'op': 'search', 'entity_type': _FRESH_ENTITY, 'query': 'match_'},
         )
 
         assert result.is_error is False
@@ -35,7 +35,7 @@ class TestSchemaSearch:
         assert result.structured_content['contains_untrusted_site_text'] is True
         assert len(result.structured_content['matches']) == 40
 
-    def test_still_unknown_scoped_search_refreshes_once_with_r4_alternatives(
+    def test_unknown_scoped_search_refreshes_once_then_returns_alternatives(
         self, fixture_site: FixtureConnection, tmp_path: Path
     ) -> None:
         connection = _StagedSchemaConnection(fixture_site)
@@ -73,7 +73,7 @@ class _StagedSchemaConnection(FixtureConnection):
         assert isinstance(raw_entity_name, dict)
         entity_name = cast('dict[str, object]', raw_entity_name)
         entity_name['value'] = 'Fresh Entity'
-        self._fresh_entities[FRESH_ENTITY] = fresh_entity
+        self._fresh_entities[_FRESH_ENTITY] = fresh_entity
 
         raw_stale_fields = self._stale_fields.get('Shot')
         assert isinstance(raw_stale_fields, dict)
@@ -88,7 +88,7 @@ class _StagedSchemaConnection(FixtureConnection):
             field_name = cast('dict[str, object]', raw_field_name)
             field_name['value'] = f'Match {index:02d}'
             fresh_fields[f'match_{index:02d}'] = field
-        self._fresh_fields[FRESH_ENTITY] = fresh_fields
+        self._fresh_fields[_FRESH_ENTITY] = fresh_fields
 
     def schema_entity_read(self) -> RawSchema:
         snapshot = self._stale_entities if self.reflections == 1 else self._fresh_entities
@@ -107,3 +107,16 @@ def test_integral_schema_offset_is_normalized(server: Server) -> None:
     assert integral.structured_content == integer.structured_content
     assert integral.structured_content is not None
     assert type(integral.structured_content['offset']) is int
+
+
+def test_search_without_query_is_audited_as_validation_error(
+    fixture_site: FixtureConnection, tmp_path: Path
+) -> None:
+    server = build_test_server(fixture_site, tmp_path)
+
+    result = call(server, 'sg_schema', {'op': 'search'})
+
+    body = assert_error_is_fenced(result)
+    assert 'requires query' in body['error']
+    audit_lines = (tmp_path / 'audit.jsonl').read_text().splitlines()
+    assert '"outcome": "validation_error"' in audit_lines[-1]
